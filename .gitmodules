@@ -1,0 +1,6 @@
+[submodule "third_party/moonlight-common-c"]
+	path = third_party/moonlight-common-c
+	url = https://github.com/moonlight-stream/moonlight-common-c
+[submodule "third_party/moonlight-embedded"]
+	path = third_party/moonlight-embedded
+	url = https://github.com/moonlight-stream/moonlight-embedded

@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libssl-dev libcurl4-openssl-dev libexpat1-dev uuid-dev \
+            libopus-dev libavcodec-dev libavutil-dev libva-dev libnl-3-dev libnl-genl-3-dev
+
+      - name: Build
+        run: |
+          cmake -S client -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

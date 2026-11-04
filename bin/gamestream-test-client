@@ -1,0 +1,13 @@
+#!/bin/sh
+# gamestream-test-client (and its short name, gtc): runs the client from its container image as if it were
+# installed. Your home directory's ~/.config/gamestream-test-client (keys, pairings) and the current directory
+# (for --json and --csv files) are shared with it at the same paths, and it uses the host's network to reach the
+# GameStream host. GTC_IMAGE picks another image, e.g. a local build.
+set -eu
+image=${GTC_IMAGE:-ghcr.io/porkloin/gamestream-test-client:latest}
+config=$HOME/.config/gamestream-test-client
+# The keys are private: create the directory 0700, as the client itself would.
+[ -d "$config" ] || { mkdir -p "$(dirname "$config")" && mkdir -m 700 "$config"; }
+exec podman run --rm --network host --security-opt label=disable \
+	-e HOME="$HOME" -v "$config:$config" -v "$PWD:$PWD" -w "$PWD" \
+	"$image" "$@"
