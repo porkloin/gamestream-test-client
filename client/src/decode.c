@@ -46,6 +46,27 @@ static enum AVPixelFormat pick_vaapi(AVCodecContext *c, const enum AVPixelFormat
 	return AV_PIX_FMT_NONE;
 }
 
+/* The decoder for ID: on a VAAPI device, one with VAAPI hwaccel, since libavcodec's default can be a
+ * software-only library (AV1's is libdav1d, which ignores hw_device_ctx and decodes on the CPU). */
+static const AVCodec *find_decoder(enum AVCodecID id)
+{
+	if (hw_device == NULL)
+		return avcodec_find_decoder(id);
+	void *it = NULL;
+	for (const AVCodec *c; (c = av_codec_iterate(&it)) != NULL;) {
+		if (c->id != id || !av_codec_is_decoder(c))
+			continue;
+		for (int i = 0;; i++) {
+			const AVCodecHWConfig *hw = avcodec_get_hw_config(c, i);
+			if (hw == NULL)
+				break;
+			if (hw->device_type == AV_HWDEVICE_TYPE_VAAPI && (hw->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
+				return c;
+		}
+	}
+	return NULL;
+}
+
 static VADisplay va_display(void)
 {
 	return ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)hw_ctx->data)->hwctx)->display;
@@ -128,9 +149,9 @@ static int setup(int video_format, int width, int height, int fps, void *context
 		id = AV_CODEC_ID_AV1;
 	else
 		return -1;
-	const AVCodec *codec = avcodec_find_decoder(id);
+	const AVCodec *codec = find_decoder(id);
 	if (codec == NULL) {
-		fprintf(stderr, "no libavcodec decoder for format 0x%x\n", video_format);
+		fprintf(stderr, "no libavcodec decoder%s for format 0x%x\n", hw_device ? " with VAAPI" : "", video_format);
 		return -1;
 	}
 	ctx = avcodec_alloc_context3(codec);
