@@ -19,14 +19,17 @@
 #define TIMER_SLACK_US 3000
 
 static uint64_t *ready_us;
+static int *ready_frame;
 static size_t ready_n, ready_cap;
 
-void display_frame(uint64_t decoded_us)
+void display_frame(int frame_number, uint64_t decoded_us)
 {
 	if (ready_n == ready_cap) {
 		ready_cap = ready_cap ? ready_cap * 2 : 4096;
 		ready_us = realloc(ready_us, ready_cap * sizeof *ready_us);
+		ready_frame = realloc(ready_frame, ready_cap * sizeof *ready_frame);
 	}
+	ready_frame[ready_n] = frame_number;
 	ready_us[ready_n++] = decoded_us;
 }
 
@@ -84,9 +87,12 @@ static void history_add(struct history *h, int len)
 		h->n++;
 }
 
-void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool paced, struct display_stats *out)
+void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool paced, struct display_stats *out,
+		      struct display_shown *each)
 {
 	memset(out, 0, sizeof *out);
+	for (size_t i = 0; each != NULL && i < n; i++)
+		each[i] = (struct display_shown){.wait_us = -1};
 	out->hz = hz;
 	if (n == 0 || fps <= 0 || hz <= 0)
 		return;
@@ -131,9 +137,13 @@ void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool pac
 		}
 		if (on_screen < 0)
 			continue;
-		latency[shown++] = (start + on_screen * period - (double)ready[frame]) / 1000.0;
-		if (last_shown >= 0 && on_screen - last_shown > expected_hold)
+		double wait_us = start + on_screen * period - (double)ready[frame];
+		latency[shown++] = wait_us / 1000.0;
+		bool judder = last_shown >= 0 && on_screen - last_shown > expected_hold;
+		if (judder)
 			out->judder++;
+		if (each != NULL)
+			each[frame] = (struct display_shown){.wait_us = (int64_t)llround(wait_us), .judder = judder};
 		last_shown = on_screen;
 	}
 	out->shown = shown;
@@ -148,8 +158,16 @@ void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool pac
 
 void display_stats(struct display_stats *vsync, struct display_stats *paced, int fps, int hz)
 {
-	display_simulate(ready_us, ready_n, fps, hz, false, vsync);
-	display_simulate(ready_us, ready_n, fps, hz, true, paced);
+	struct display_shown *v = calloc(ready_n ? ready_n : 1, sizeof *v), *p = calloc(ready_n ? ready_n : 1, sizeof *p);
+	display_simulate(ready_us, ready_n, fps, hz, false, vsync, v);
+	display_simulate(ready_us, ready_n, fps, hz, true, paced, p);
+	/* Each frame's fate, for the --stats stream, then the totals; nothing when no frame was decoded. */
+	for (size_t i = 0; i < ready_n; i++)
+		record_display(ready_frame[i], ready_us[i], &v[i], &p[i]);
+	if (ready_n > 0)
+		record_display_summary(fps, vsync, paced);
+	free(v);
+	free(p);
 }
 
 void display_summary(FILE *out, const struct display_stats *vsync, const struct display_stats *paced)

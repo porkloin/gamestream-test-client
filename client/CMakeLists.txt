@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.16)
 project(gamestream-test-client LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 
+# The commit --version names: CI and moonshine-test-headless pass it; a local build says "dev".
+set(GTC_COMMIT "dev" CACHE STRING "the commit this client is built from")
+
 set(THIRD_PARTY ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 
 # moonlight-common-c, linked statically so the binary stands alone.
@@ -28,6 +31,7 @@ target_link_libraries(gamestream PUBLIC moonlight-common-c OpenSSL::SSL OpenSSL:
 add_executable(gamestream-test-client src/main.c src/decode.c src/loss.c src/queue.c src/click.c src/record.c src/probe.c src/clock.c src/display.c)
 target_include_directories(gamestream-test-client PRIVATE ${AV_INCLUDE_DIRS} ${THIRD_PARTY}/moonlight-common-c/src)
 target_compile_options(gamestream-test-client PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_compile_definitions(gamestream-test-client PRIVATE GTC_COMMIT="${GTC_COMMIT}")
 target_link_libraries(gamestream-test-client PRIVATE gamestream moonlight-common-c ${AV_LIBRARIES} m)
 # The loss injector sits between moonlight-common-c and the socket calls, and takes the
 # acknowledgement flag off the frames the host flags before the library sees them.

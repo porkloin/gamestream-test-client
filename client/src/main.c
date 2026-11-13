@@ -20,6 +20,11 @@
 
 #include "test_client.h"
 
+/* The commit this client is built from (CMake's GTC_COMMIT); the tests that include this file say "dev". */
+#ifndef GTC_COMMIT
+#define GTC_COMMIT "dev"
+#endif
+
 #define starts_with(s, p) (strncmp((s), (p), sizeof(p) - 1) == 0)
 
 static atomic_bool terminated;
@@ -80,6 +85,7 @@ static void usage(int code)
 		"  --keys DIR                keys directory ($HOME/.config/gamestream-test-client)\n"
 		"  -v, --verbose             the protocol library's log on stderr\n"
 		"  -h, --help                this text, exiting 0\n"
+		"  -V, --version             the commit this client is built from, exiting 0\n"
 		"  pair PIN                  pair with PIN (enter it on the host)\n"
 		"  list                      list the host's apps\n"
 		"  clock-serve [--port N]    answer NTP with this machine's clock (123), for --clock\n"
@@ -253,9 +259,9 @@ static bool write_json(const char *path, const struct named *v, size_t n, bool e
 		perror(path);
 		return false;
 	}
-	fputc('{', f);
+	fprintf(f, "{\"client_version\":\"%s\"", GTC_COMMIT);
 	for (size_t i = 0; i < n; i++) {
-		fprintf(f, "%s\"%s\":", i ? "," : "", v[i].name);
+		fprintf(f, ",\"%s\":", v[i].name);
 		if (!v[i].available)
 			fputs("null", f);
 		else if (v[i].value == (double)(long long)v[i].value)
@@ -525,6 +531,7 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		perror(csv != NULL ? csv : stats);
 		return 1;
 	}
+	record_version(GTC_COMMIT);
 	loss_configure(&loss);
 	record_set_bitrate(bitrate);
 	if (stats != NULL) {
@@ -716,6 +723,7 @@ int main(int argc, char **argv)
 		{"keys", required_argument, NULL, 'k'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"help", no_argument, NULL, 'h'},
+		{"version", no_argument, NULL, 'V'},
 		{0},
 	};
 	char *host = "127.0.0.1";
@@ -723,9 +731,10 @@ int main(int argc, char **argv)
 	const char *keys = NULL;
 	int opt;
 	/* Stop at the command; its own options are parsed after it. */
-	while ((opt = getopt_long(argc, argv, "+hH:p:k:v", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "+hVH:p:k:v", options, NULL)) != -1) {
 		switch (opt) {
 		case 'h': usage(0); break;
+		case 'V': printf("gamestream-test-client %s\n", GTC_COMMIT); return 0;
 		case 'H': host = optarg; break;
 		case 'p': port = atoi(optarg); break;
 		case 'k': keys = optarg; break;

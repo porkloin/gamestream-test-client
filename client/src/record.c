@@ -93,6 +93,11 @@ void record_clock(const char *when, const char *server, const struct clock_resul
 		   (long long)clock_offset_us);
 }
 
+void record_version(const char *version)
+{
+	stats_line("{\"type\":\"client\",\"version\":\"%s\"}\n", version);
+}
+
 void record_drop(uint32_t frame_number)
 {
 	stats_line("{\"type\":\"drop\",\"frame_number\":%u,\"unix_us\":%lld}\n", frame_number,
@@ -215,7 +220,7 @@ void record_frame(const struct frame_row *r)
 	last_receive_us = r->receive_us;
 	last_frame = r->frame_number;
 	if (r->decode_status == 0 && r->decode_end_us > 0)
-		display_frame(r->decode_end_us);
+		display_frame(r->frame_number, r->decode_end_us);
 	if (r->decode_end_us > r->decode_start_us) {
 		if (decodes == decodes_cap) {
 			decodes_cap = decodes_cap ? decodes_cap * 2 : 4096;
@@ -223,6 +228,32 @@ void record_frame(const struct frame_row *r)
 		}
 		decodes_ms[decodes++] = (r->decode_end_us - r->decode_start_us) / 1000.0;
 	}
+}
+
+void record_display(int frame_number, uint64_t decoded_us, const struct display_shown *vsync,
+		    const struct display_shown *paced)
+{
+	char v[32] = "null", p[32] = "null";
+	if (vsync->wait_us >= 0)
+		snprintf(v, sizeof v, "%lld", (long long)vsync->wait_us);
+	if (paced->wait_us >= 0)
+		snprintf(p, sizeof p, "%lld", (long long)paced->wait_us);
+	stats_line("{\"type\":\"display\",\"frame_number\":%d,\"decoded_unix_us\":%lld,\"vsync_wait_us\":%s,"
+		   "\"vsync_judder\":%s,\"paced_wait_us\":%s,\"paced_judder\":%s}\n",
+		   frame_number, (long long)((int64_t)decoded_us + wall_offset_us()), v,
+		   vsync->judder ? "true" : "false", p, paced->judder ? "true" : "false");
+}
+
+void record_display_summary(int fps, const struct display_stats *vsync, const struct display_stats *paced)
+{
+	const struct display_stats *s[] = {vsync, paced};
+	char part[2][192];
+	for (int i = 0; i < 2; i++)
+		snprintf(part[i], sizeof part[i],
+			 "{\"shown\":%zu,\"dropped\":%zu,\"judder\":%zu,\"latency_ms_p50\":%.2f,\"latency_ms_p99\":%.2f}",
+			 s[i]->shown, s[i]->dropped, s[i]->judder, s[i]->latency_p50_ms, s[i]->latency_p99_ms);
+	stats_line("{\"type\":\"display_summary\",\"hz\":%d,\"fps\":%d,\"vsync\":%s,\"paced\":%s,\"unix_us\":%lld}\n",
+		   vsync->hz, fps, part[0], part[1], (long long)wall_now_us());
 }
 
 static int compare(const void *a, const void *b)
