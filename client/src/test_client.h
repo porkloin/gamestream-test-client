@@ -87,6 +87,8 @@ void record_clock(const char *when, const char *server, const struct clock_resul
 /* The bitrate the stream asked for, for the --stats stream's `second` lines. */
 void record_set_bitrate(int kbps);
 /* Events for the --stats stream; any thread. */
+/* The --stats stream's first line: the client's commit. */
+void record_version(const char *version);
 void record_drop(uint32_t frame_number);
 void record_click(int id, int frame_number, uint64_t sent_us, uint64_t decoded_us, uint64_t received_us);
 void record_frame(const struct frame_row *row);
@@ -120,10 +122,22 @@ struct display_stats {
 	/* Decoded to on screen. */
 	double latency_p50_ms, latency_p99_ms;
 };
-void display_frame(uint64_t decoded_us);
-void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool paced, struct display_stats *out);
+/* One frame's fate on the display: how long after it was decoded it went on screen (-1: dropped, never shown), and
+ * whether it came a refresh or more later than the stream's rate needs (the frame before it held too long). */
+struct display_shown {
+	int64_t wait_us;
+	bool judder;
+};
+void display_frame(int frame_number, uint64_t decoded_us);
+/* `each`, when not NULL, gets each of the `n` frames' fate. */
+void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool paced, struct display_stats *out,
+		      struct display_shown *each);
 void display_stats(struct display_stats *vsync, struct display_stats *paced, int fps, int hz);
 void display_summary(FILE *out, const struct display_stats *vsync, const struct display_stats *paced);
+/* The display model's lines on the --stats stream, written once the stream ends (display.c). */
+void record_display(int frame_number, uint64_t decoded_us, const struct display_shown *vsync,
+		    const struct display_shown *paced);
+void record_display_summary(int fps, const struct display_stats *vsync, const struct display_stats *paced);
 
 /* Click-to-flash latency (click.c). */
 struct click_stats {

@@ -7,7 +7,9 @@ FROM docker.io/library/archlinux:latest AS build
 RUN pacman -Syu --noconfirm --needed base-devel cmake pkgconf openssl curl expat util-linux-libs opus ffmpeg libva libnl \
     && pacman -Scc --noconfirm
 COPY . /src
-RUN cmake -S /src/client -B /build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+# The commit --version and the results name (CI passes it).
+ARG GTC_COMMIT=dev
+RUN cmake -S /src/client -B /build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DGTC_COMMIT="$GTC_COMMIT" \
     && cmake --build /build -j"$(nproc)" \
     && cmake --install /build --prefix /usr/local
 

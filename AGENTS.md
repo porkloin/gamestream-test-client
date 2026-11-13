@@ -37,6 +37,7 @@ gamestream-test-client [--host H] [--port PORT] [--keys DIR] [-v] COMMAND
   --keys DIR                keys directory ($HOME/.config/gamestream-test-client)
   -v, --verbose             the protocol library's log on stderr
   -h, --help                this text, exiting 0
+  -V, --version             the commit this client is built from, exiting 0
   pair PIN                  pair with PIN (enter it on the host)
   list                      list the host's apps
   probe [--sysfs DIR] [--os-release FILE]
@@ -158,6 +159,7 @@ requests idr=0 rfi=14 recovery=5
 
 | Field | |
 |---|---|
+| `client_version` | the commit the client is built from (`--version`: CMake's `GTC_COMMIT`, which CI and moonshine-test-headless set; `dev` otherwise) |
 | `frames`, `seconds`, `fps` | frames handed to the decoder, time from the first frame to the end of the stream, rate over that time |
 | `idr` | keyframes received |
 | `missing` | frame numbers skipped between the frames handed to the decoder |
@@ -190,7 +192,14 @@ written whole by any thread: `drop` (the loss model started dropping `frame_numb
 their first packets; `recovered_by` recovery_frame, keyframe or neither), `click` (its id, the frame the flash was decoded from as `flash_frame`, and when the click was sent and its flash
 decoded and received) and `second` (each second of the stream from the first frame's arrival: its `bytes` and
 `frames`, the busiest sliding one-second window so far as `peak_window_bytes`, as the report measures it, and the
-`requested_kbps`). `loss.c` and `click.c` report through the `loss_on_drop` and `click_on_flash` hooks, so
+`requested_kbps`). The first line is `client` (its `version`, as `--version`). Once the stream ends, the display model
+adds a `display` line per decoded frame (its `frame_number`, `decoded_unix_us`, and for V-Sync and the frame pacer
+`vsync_wait_us`/`paced_wait_us`, decoded to on screen, null when the frame was dropped and never shown, and
+`vsync_judder`/`paced_judder`, true when it went up a refresh or more later than the stream's rate needs because the
+frame before it held), then one `display_summary` (`hz`, `fps`, and `vsync` and `paced` objects with the `--json`
+display fields: `shown`, `dropped`, `judder`, `latency_ms_p50`, `latency_ms_p99`). They come at the end because the
+model replays the whole stream; a reader that stops at the client's exit has to read to the end of the file first.
+`loss.c` and `click.c` report through the `loss_on_drop` and `click_on_flash` hooks, so
 their tests build without the recorder. Each click's id travels with it: before the press, the pointer goes to the
 middle of cell `id` of a 64 × 32 grid over the stream (`click_position`), and the app reads the id back from where
 the pointer is over its window (row × 64 + column), so ids survive scaling and a lost input doesn't shift the rest.

@@ -21,10 +21,10 @@ jobs:
           submodules: recursive
 
       - name: Build
-        run: podman build -t ghcr.io/${{ github.repository }}:latest -t ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA::7} .
+        run: podman build --build-arg GTC_COMMIT=${GITHUB_SHA::7} -t ghcr.io/${{ github.repository }}:latest -t ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA::7} .
 
       - name: Smoke test
-        run: podman run --rm ghcr.io/${{ github.repository }}:latest --help
+        run: podman run --rm ghcr.io/${{ github.repository }}:latest --version
 
       - name: Push
         if: github.event_name != 'pull_request'
