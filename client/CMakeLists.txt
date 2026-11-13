@@ -25,7 +25,7 @@ add_library(gamestream STATIC
 target_include_directories(gamestream PUBLIC ${GAMESTREAM} ${UUID_INCLUDE_DIRS})
 target_link_libraries(gamestream PUBLIC moonlight-common-c OpenSSL::SSL OpenSSL::Crypto CURL::libcurl EXPAT::EXPAT ${UUID_LIBRARIES})
 
-add_executable(gamestream-test-client src/main.c src/decode.c src/loss.c src/queue.c src/click.c src/record.c src/probe.c src/clock.c)
+add_executable(gamestream-test-client src/main.c src/decode.c src/loss.c src/queue.c src/click.c src/record.c src/probe.c src/clock.c src/display.c)
 target_include_directories(gamestream-test-client PRIVATE ${AV_INCLUDE_DIRS} ${THIRD_PARTY}/moonlight-common-c/src)
 target_compile_options(gamestream-test-client PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(gamestream-test-client PRIVATE gamestream moonlight-common-c ${AV_LIBRARIES} m)
@@ -49,12 +49,18 @@ target_link_libraries(test_click PRIVATE m pthread)
 add_test(NAME click COMMAND test_click)
 
 # The --expect parser lives in main.c, included with its entry point renamed.
-add_executable(test_expect tests/test_expect.c src/decode.c src/loss.c src/queue.c src/click.c src/record.c src/probe.c src/clock.c)
+add_executable(test_expect tests/test_expect.c src/decode.c src/loss.c src/queue.c src/click.c src/record.c src/probe.c src/clock.c src/display.c)
 target_include_directories(test_expect PRIVATE src ${THIRD_PARTY}/moonlight-common-c/src ${AV_INCLUDE_DIRS})
 target_compile_options(test_expect PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(test_expect PRIVATE gamestream moonlight-common-c ${AV_LIBRARIES} m)
 target_link_options(test_expect PRIVATE -Wl,--wrap=recvfrom -Wl,--wrap=sendto -Wl,--wrap=connectionReceivedCompleteFrame)
 add_test(NAME expect COMMAND test_expect)
+
+add_executable(test_display tests/test_display.c src/display.c)
+target_include_directories(test_display PRIVATE src ${THIRD_PARTY}/moonlight-common-c/src)
+target_compile_options(test_display PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(test_display PRIVATE m)
+add_test(NAME display COMMAND test_display)
 
 add_executable(test_clock tests/test_clock.c src/clock.c)
 target_include_directories(test_clock PRIVATE src ${THIRD_PARTY}/moonlight-common-c/src)

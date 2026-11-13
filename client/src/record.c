@@ -214,6 +214,8 @@ void record_frame(const struct frame_row *r)
 	}
 	last_receive_us = r->receive_us;
 	last_frame = r->frame_number;
+	if (r->decode_status == 0 && r->decode_end_us > 0)
+		display_frame(r->decode_end_us);
 	if (r->decode_end_us > r->decode_start_us) {
 		if (decodes == decodes_cap) {
 			decodes_cap = decodes_cap ? decodes_cap * 2 : 4096;

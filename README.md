@@ -25,7 +25,11 @@ how it asks the host for an IDR or a reference frame invalidation. Set up as moo
 Not like Moonlight:
 
 - **It stops at decode.** No renderer, frame pacer or display: frame times and click latency end when a frame is
-  decoded (on the VAAPI device: once the GPU finished it). A real client adds its pacing and the display.
+  decoded (on the VAAPI device: once the GPU finished it). What a display would show is modelled instead: the
+  summary replays each decoded frame against a refresh clock (`--display HZ`, the stream's frame rate by default)
+  through moonlight-qt's V-Sync presenting (its default) and its frame pacer, and counts the frames dropped, the
+  judder (frames held longer than the rates need) and the time from decoded to on screen. Rendering is taken as
+  instant.
 - **Decoding** is libavcodec, in software or on VAAPI, as moonlight-qt on Linux. Windows (D3D11VA), macOS
   (VideoToolbox) and Android (MediaCodec) decoders aren't covered.
 - **Network trouble is simulated** before moonlight-common-c sees the packets, so Moonlight reacts to it as to real
