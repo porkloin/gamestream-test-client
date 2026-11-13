@@ -110,6 +110,21 @@ void record_stats(struct record_stats *out, int fps, uint64_t end_us);
 void record_summary(FILE *out, const struct record_stats *stats);
 void record_close(void);
 
+/* What a display would show (display.c): each decoded frame's time against a refresh clock, through moonlight-qt's
+ * presenting with V-Sync and with its frame pacer. */
+struct display_stats {
+	int hz;
+	size_t shown, dropped;
+	/* Frames held on screen for more refreshes than the stream's rate needs. */
+	size_t judder;
+	/* Decoded to on screen. */
+	double latency_p50_ms, latency_p99_ms;
+};
+void display_frame(uint64_t decoded_us);
+void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool paced, struct display_stats *out);
+void display_stats(struct display_stats *vsync, struct display_stats *paced, int fps, int hz);
+void display_summary(FILE *out, const struct display_stats *vsync, const struct display_stats *paced);
+
 /* Click-to-flash latency (click.c). */
 struct click_stats {
 	int clicks, flashes, missed;

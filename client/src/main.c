@@ -105,6 +105,8 @@ static void usage(int code)
 		"                            default 1392, or 1024 to a host outside the private ranges, as\n"
 		"                            Moonlight decides)\n"
 		"    --seconds N             (20)\n"
+		"    --display HZ            the refresh rate of the display the summary shows the frames on, through\n"
+		"                            moonlight-qt's V-Sync and frame pacing (the stream's frame rate)\n"
 		"    --csv PATH              per-frame record\n"
 		"    --stats PATH            per-frame JSON lines as frames decode, times by the wall clock\n"
 		"    --clock HOST[:PORT]     measure the host's clock by NTP before and after the stream\n"
@@ -282,7 +284,7 @@ static bool write_json(const char *path, const struct named *v, size_t n, bool e
 
 static int stream(PSERVER_DATA server, int argc, char **argv)
 {
-	enum { CODEC = 256, HDR, DECODE, DECODE_DEVICE, AVOID_GPU, DUMP, MODE, BITRATE, SECONDS, CSV, STATS, CLOCK, JSON, EXPECT, NO_RFI, RFI_H264, NO_ACK, QUIT, SEED, RANDOM, FRAME_EVERY, FRAME_RUN, WARMUP, BURST, BURSTY, PACKET_SIZE, DECODE_DELAY, DELAY, REORDER, DUPLICATE, RATE, CLICK_EVERY };
+	enum { CODEC = 256, HDR, DECODE, DECODE_DEVICE, AVOID_GPU, DUMP, MODE, BITRATE, SECONDS, CSV, STATS, CLOCK, JSON, EXPECT, NO_RFI, RFI_H264, NO_ACK, QUIT, SEED, RANDOM, FRAME_EVERY, FRAME_RUN, WARMUP, BURST, BURSTY, PACKET_SIZE, DECODE_DELAY, DISPLAY, DELAY, REORDER, DUPLICATE, RATE, CLICK_EVERY };
 	static const struct option options[] = {
 		{"codec", required_argument, NULL, CODEC},
 		{"hdr", no_argument, NULL, HDR},
@@ -310,6 +312,7 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"loss-burst", required_argument, NULL, BURST},
 		{"loss-bursty", required_argument, NULL, BURSTY},
 		{"packet-size", required_argument, NULL, PACKET_SIZE},
+		{"display", required_argument, NULL, DISPLAY},
 		{"decode-delay", required_argument, NULL, DECODE_DELAY},
 		{"delay", required_argument, NULL, DELAY},
 		{"reorder", required_argument, NULL, REORDER},
@@ -321,7 +324,7 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	const char *codec = "hevc", *csv = NULL, *stats = NULL, *clock_server = NULL, *json = NULL;
 	struct expectation expect[MAX_EXPECT];
 	size_t expectations = 0;
-	int width = 1920, height = 1080, fps = 60, bitrate = 20000, seconds = 20, packet_size = 0;
+	int width = 1920, height = 1080, fps = 60, bitrate = 20000, seconds = 20, packet_size = 0, display_hz = 0;
 	bool rfi = true, rfi_h264 = false, quit = false, hdr = false;
 	struct loss_config loss = {.seed = 1, .frame_warmup = 120};
 	bool decode_none = false, decode_hw = false;
@@ -389,6 +392,13 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 			if (sscanf(optarg, "%lf:%lf", &loss.bursty_percent, &loss.bursty_length) != 2 ||
 			    loss.bursty_percent <= 0 || loss.bursty_percent >= 100 || loss.bursty_length < 1) {
 				fprintf(stderr, "bad --loss-bursty: %s (PERCENT:LENGTH, 0 < PERCENT < 100, LENGTH >= 1)\n", optarg);
+				return 2;
+			}
+			break;
+		case DISPLAY:
+			display_hz = atoi(optarg);
+			if (display_hz < 1 || display_hz > 1000) {
+				fprintf(stderr, "bad --display: %s (a refresh rate in Hz)\n", optarg);
 				return 2;
 			}
 			break;
@@ -576,6 +586,9 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	struct loss_stats loss_run;
 	struct click_stats clk;
 	record_stats(&rec, fps, end_us);
+	struct display_stats vsync, paced;
+	display_stats(&vsync, &paced, fps, display_hz > 0 ? display_hz : fps);
+	bool displaying = !decode_none && vsync.shown > 0;
 	loss_stats(&loss_run);
 	click_stats(&clk);
 	bool intervals = rec.intervals > 0, clicking = click_enabled(), click_samples = clk.samples > 0;
@@ -598,6 +611,17 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"decode_ms_p95", rec.decode_p95_ms, rec.decodes > 0 && !decode_none},
 		{"decode_ms_p99", rec.decode_p99_ms, rec.decodes > 0 && !decode_none},
 		{"decode_ms_max", rec.decode_max_ms, rec.decodes > 0 && !decode_none},
+		{"display_hz", vsync.hz, displaying},
+		{"display_shown", (double)vsync.shown, displaying},
+		{"display_dropped", (double)vsync.dropped, displaying},
+		{"display_judder", (double)vsync.judder, displaying},
+		{"display_latency_ms_p50", vsync.latency_p50_ms, displaying},
+		{"display_latency_ms_p99", vsync.latency_p99_ms, displaying},
+		{"paced_shown", (double)paced.shown, displaying},
+		{"paced_dropped", (double)paced.dropped, displaying},
+		{"paced_judder", (double)paced.judder, displaying},
+		{"paced_latency_ms_p50", paced.latency_p50_ms, displaying},
+		{"paced_latency_ms_p99", paced.latency_p99_ms, displaying},
 		{"video_packets", (double)loss_run.video_packets, true},
 		{"dropped_packets", (double)loss_run.dropped_packets, true},
 		{"dropped_frames", (double)loss_run.dropped_frames, true},
@@ -620,6 +644,8 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	size_t values_n = sizeof values / sizeof *values;
 	record_summary(stdout, &rec);
 	loss_summary(stdout, &loss_run);
+	if (displaying)
+		display_summary(stdout, &vsync, &paced);
 	printf("requests idr=%d rfi=%d recovery=%d\n", (int)idr_requests, (int)rfi_requests,
 		(int)recovery_requests);
 	if (clicking)

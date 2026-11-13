@@ -58,6 +58,8 @@ gamestream-test-client [--host H] [--port PORT] [--keys DIR] [-v] COMMAND
                             default 1392, or 1024 to a host outside the private ranges, as
                             Moonlight decides)
     --seconds N             (20)
+    --display HZ            the refresh rate of the display the summary shows the frames on, through
+                            moonlight-qt's V-Sync and frame pacing (the stream's frame rate)
     --csv PATH              per-frame record
     --stats PATH            per-frame JSON lines as frames decode, times by the wall clock
     --clock HOST[:PORT]     measure the host's clock by NTP before and after the stream, and give
@@ -162,6 +164,8 @@ requests idr=0 rfi=14 recovery=5
 | `decode_hw` | 1 when it decoded on a VAAPI device |
 | `decoder` | how: `{"how": "vaapi", "gpu": GPU}` (a GPU as `probe` writes it), `{"how": "software", "driver": "libavcodec 61.19.100"}` or `{"how": "none"}` |
 | `decode_ms_p50`, `decode_ms_p95`, `decode_ms_p99`, `decode_ms_max` | from handing a frame to the decoder to its picture being ready (null with `--decode none`); a p95 near the frame interval means the client is the bottleneck |
+| `display_hz`, `display_shown`, `display_dropped`, `display_judder`, `display_latency_ms_p50`, `display_latency_ms_p99` | the decoded frames replayed against a `display_hz` refresh clock (`--display`, else the stream's fps; the first refresh half a refresh after the first frame) through moonlight-qt's V-Sync presenting: a frame shows at the next refresh, the render queue keeps the newest (up to 2 while it recently ran dry); judder counts frames held more refreshes than ceil(hz/fps); latency is decoded to on screen, rendering taken as instant (null with `--decode none`) |
+| `paced_shown`, `paced_dropped`, `paced_judder`, `paced_latency_ms_p50`, `paced_latency_ms_p99` | the same through moonlight-qt's frame pacer: at each refresh it takes the oldest frame (waiting up to the refresh less 3 ms for one), shown at the next refresh; it keeps 1 queued, or 3 while it recently held 1 or none at a stream rate at or above the refresh |
 | `decode_errors` | frames libavcodec failed to decode |
 | `corrupt` | frames libavcodec decoded but flagged corrupt |
 | `stalls`, `stalled_ms` | gaps longer than three frame intervals (including the one from the last frame to the end), and their total |
