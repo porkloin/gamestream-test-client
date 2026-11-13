@@ -101,7 +101,9 @@ static void usage(int code)
 		"    --dump PATH             write the received bitstream to PATH\n"
 		"    --mode WxHxFPS          (1920x1080x60)\n"
 		"    --bitrate KBPS          (20000)\n"
-		"    --packet-size BYTES     video payload per packet the host sends (1392)\n"
+		"    --packet-size BYTES     video payload per packet the host sends, and stream as on a LAN (by\n"
+		"                            default 1392, or 1024 to a host outside the private ranges, as\n"
+		"                            Moonlight decides)\n"
 		"    --seconds N             (20)\n"
 		"    --csv PATH              per-frame record\n"
 		"    --stats PATH            per-frame JSON lines as frames decode, times by the wall clock\n"
@@ -111,6 +113,8 @@ static void usage(int code)
 		"    --expect EXPR           fail with 3 unless a summary value holds:\n"
 		"                            NAME OP NUMBER, OP one of <= >= == < >\n"
 		"    --no-rfi                don't offer reference frame invalidation\n"
+		"    --rfi-h264              offer it for H.264 too, as some Android decoders do (desktop\n"
+		"                            Moonlight offers it for HEVC and AV1 only)\n"
 		"    --no-ack                don't acknowledge frames the host asks about\n"
 		"    --quit                  quit the app on the host afterwards\n"
 		"    --seed N                loss seed (1)\n"
@@ -278,7 +282,7 @@ static bool write_json(const char *path, const struct named *v, size_t n, bool e
 
 static int stream(PSERVER_DATA server, int argc, char **argv)
 {
-	enum { CODEC = 256, HDR, DECODE, DECODE_DEVICE, AVOID_GPU, DUMP, MODE, BITRATE, SECONDS, CSV, STATS, CLOCK, JSON, EXPECT, NO_RFI, NO_ACK, QUIT, SEED, RANDOM, FRAME_EVERY, FRAME_RUN, WARMUP, BURST, BURSTY, PACKET_SIZE, DECODE_DELAY, DELAY, REORDER, DUPLICATE, RATE, CLICK_EVERY };
+	enum { CODEC = 256, HDR, DECODE, DECODE_DEVICE, AVOID_GPU, DUMP, MODE, BITRATE, SECONDS, CSV, STATS, CLOCK, JSON, EXPECT, NO_RFI, RFI_H264, NO_ACK, QUIT, SEED, RANDOM, FRAME_EVERY, FRAME_RUN, WARMUP, BURST, BURSTY, PACKET_SIZE, DECODE_DELAY, DELAY, REORDER, DUPLICATE, RATE, CLICK_EVERY };
 	static const struct option options[] = {
 		{"codec", required_argument, NULL, CODEC},
 		{"hdr", no_argument, NULL, HDR},
@@ -295,6 +299,7 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"json", required_argument, NULL, JSON},
 		{"expect", required_argument, NULL, EXPECT},
 		{"no-rfi", no_argument, NULL, NO_RFI},
+		{"rfi-h264", no_argument, NULL, RFI_H264},
 		{"no-ack", no_argument, NULL, NO_ACK},
 		{"quit", no_argument, NULL, QUIT},
 		{"seed", required_argument, NULL, SEED},
@@ -316,8 +321,8 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	const char *codec = "hevc", *csv = NULL, *stats = NULL, *clock_server = NULL, *json = NULL;
 	struct expectation expect[MAX_EXPECT];
 	size_t expectations = 0;
-	int width = 1920, height = 1080, fps = 60, bitrate = 20000, seconds = 20, packet_size = 1392;
-	bool rfi = true, quit = false, hdr = false;
+	int width = 1920, height = 1080, fps = 60, bitrate = 20000, seconds = 20, packet_size = 0;
+	bool rfi = true, rfi_h264 = false, quit = false, hdr = false;
 	struct loss_config loss = {.seed = 1, .frame_warmup = 120};
 	bool decode_none = false, decode_hw = false;
 	const char *decode_device = NULL, *avoid_gpu = NULL;
@@ -368,6 +373,7 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 			expectations++;
 			break;
 		case NO_RFI: rfi = false; break;
+		case RFI_H264: rfi_h264 = true; break;
 		case NO_ACK: loss.strip_ack = true; break;
 		case QUIT: quit = true; break;
 		case SEED: loss.seed = strtoull(optarg, NULL, 10); break;
@@ -479,8 +485,11 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	config.height = height;
 	config.fps = fps;
 	config.bitrate = bitrate;
-	config.packetSize = packet_size;
-	config.streamingRemotely = STREAM_CFG_LOCAL;
+	/* As moonlight-qt: a packet size given streams as on a LAN; otherwise moonlight-common-c
+	 * decides from the host's address, and caps the packets at 1024 bytes for a remote IPv4
+	 * host (anything outside RFC 1918 and link-local, Tailscale's 100.64/10 included). */
+	config.packetSize = packet_size > 0 ? packet_size : 1392;
+	config.streamingRemotely = packet_size > 0 ? STREAM_CFG_LOCAL : STREAM_CFG_AUTO;
 	config.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
 	/* Moonlight's default: audio encrypted, video only when the host requires it. */
 	config.encryptionFlags = ENCFLG_AUDIO;
@@ -522,10 +531,12 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 			fprintf(stderr, "no NTP answer from %s: times stay on this machine's clock\n", clock_server);
 		record_clock("start", clock_server, clock_ok ? &clock_start : NULL);
 	}
-	test_decoder.capabilities = rfi ? CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC |
-						 CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
-						 CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1
-				       : 0;
+	/* moonlight-qt's decoders offer invalidation for HEVC and AV1, never H.264. */
+	test_decoder.capabilities = 0;
+	if (rfi)
+		test_decoder.capabilities = CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
+					    CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1 |
+					    (rfi_h264 ? CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC : 0);
 
 	int ret = gs_start_app(server, &config, app_id, false, false, 0);
 	if (ret != GS_OK) {
@@ -557,8 +568,10 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	if (quit)
 		gs_quit_app(server);
 
-	printf("stream app=\"%s\" codec=%s hdr=%d mode=%dx%dx%d bitrate=%d rfi=%d decode=%s\n", app, codec, hdr, width,
-	       height, fps, bitrate, rfi, decode_hw ? decode_hw_device() : decode_how);
+	/* The packet size chosen for a remote host is in moonlight-common-c's log above. */
+	printf("stream app=\"%s\" codec=%s hdr=%d mode=%dx%dx%d bitrate=%d rfi=%d packets=%s decode=%s\n", app, codec,
+	       hdr, width, height, fps, bitrate, rfi && (strcmp(codec, "h264") != 0 || rfi_h264),
+	       packet_size > 0 ? "lan" : "auto", decode_hw ? decode_hw_device() : decode_how);
 	struct record_stats rec;
 	struct loss_stats loss_run;
 	struct click_stats clk;

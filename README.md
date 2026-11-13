@@ -11,6 +11,27 @@ client.
 > What it measures says how a host behaves under those conditions, not what a real Moonlight client on a real
 > network and display will see.
 
+## How close to Moonlight
+
+The same as Moonlight, because it's moonlight-common-c: RTSP, the control stream, FEC, depacketizing, and when and
+how it asks the host for an IDR or a reference frame invalidation. Set up as moonlight-qt does by default:
+
+- **LAN or remote**: decided from the host's address, as moonlight-qt does. A host outside the private ranges
+  (Tailscale's 100.64/10 counts as outside) gets 1024-byte packets over IPv4 and 500 kb/s less bitrate; on a LAN,
+  1392-byte packets. `--packet-size` sets the size and streams as on a LAN, as moonlight-qt's packet size setting does.
+- **Reference frame invalidation**: offered for HEVC and AV1, as every moonlight-qt decoder does. `--rfi-h264` offers
+  it for H.264 too, as some Android decoders do.
+
+Not like Moonlight:
+
+- **It stops at decode.** No renderer, frame pacer or display: frame times and click latency end when a frame is
+  decoded (on the VAAPI device: once the GPU finished it). A real client adds its pacing and the display.
+- **Decoding** is libavcodec, in software or on VAAPI, as moonlight-qt on Linux. Windows (D3D11VA), macOS
+  (VideoToolbox) and Android (MediaCodec) decoders aren't covered.
+- **Network trouble is simulated** before moonlight-common-c sees the packets, so Moonlight reacts to it as to real
+  loss, but it follows the options, not a real network's patterns.
+- **Audio** is received and thrown away; **input** is only `--click-every`'s clicks.
+
 Just want to test a Moonshine PR on your GPU? Use [moonshine-test-headless](https://github.com/porkloin/moonshine-test-headless).
 
 ## Behaviors
@@ -70,11 +91,12 @@ Each behavior is a `stream` option:
 | Reordering | `--reorder PCT:MS` | `--reorder 5:10` |
 | Duplicates | `--duplicate PCT` | `--duplicate 2` |
 | Bandwidth cap | `--rate KBPS[:QUEUE_MS]` | `--rate 15000:50` |
-| Small packets | `--packet-size BYTES` | `--packet-size 1024` |
+| Small packets | `--packet-size BYTES` (and stream as on a LAN) | `--packet-size 1024` |
 | Hardware decode | `--decode hw` (picks the GPU; `--decode-device PATH` to choose) | `--decode hw --decode-device /dev/dri/renderD129` |
 | Slow decoder | `--decode-delay MS` | `--decode-delay 20` |
 | Click-to-flash latency | `--click-every MS` | `--click-every 1000` |
 | Old client | `--no-rfi`, `--no-ack` | `--no-rfi` |
+| H.264 invalidation (Android) | `--rfi-h264` | `--rfi-h264` |
 
 Loss options use `--seed N` (same seed, same drops), and frame drops start after `--loss-warmup N` frames (120).
 

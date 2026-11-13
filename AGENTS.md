@@ -54,7 +54,9 @@ gamestream-test-client [--host H] [--port PORT] [--keys DIR] [-v] COMMAND
     --dump PATH             write the received bitstream to PATH
     --mode WxHxFPS          (1920x1080x60)
     --bitrate KBPS          (20000)
-    --packet-size BYTES     video payload per packet the host sends (1392)
+    --packet-size BYTES     video payload per packet the host sends, and stream as on a LAN (by
+                            default 1392, or 1024 to a host outside the private ranges, as
+                            Moonlight decides)
     --seconds N             (20)
     --csv PATH              per-frame record
     --stats PATH            per-frame JSON lines as frames decode, times by the wall clock
@@ -63,6 +65,8 @@ gamestream-test-client [--host H] [--port PORT] [--keys DIR] [-v] COMMAND
     --json PATH             write the summary as one JSON object
     --expect EXPR           fail with 3 unless a summary value holds: NAME OP NUMBER, OP one of <= >= == < >
     --no-rfi                don't offer reference frame invalidation
+    --rfi-h264              offer it for H.264 too, as some Android decoders do (desktop
+                            Moonlight offers it for HEVC and AV1 only)
     --no-ack                don't acknowledge frames the host asks about
     --quit                  quit the app on the host afterwards
     --seed N                loss seed (1)
