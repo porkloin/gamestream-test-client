@@ -8,6 +8,7 @@
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
 #include <va/va.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -219,6 +220,86 @@ static void check_picture(const AVFrame *f, struct picture_result *r)
 	vaUnmapBuffer(v.display, whole.buf);
 }
 
+/* --check-picture runs off the decoder's thread: the decoder hands each decoded frame (a reference to it, so its
+ * surface stays alive) to a worker that reads it back and checks it. The decoder waits for nothing; when the worker is
+ * behind and the queue full, the frame is skipped and counted instead. The queue's frames are surfaces held out of
+ * the decoder's pool, so the pool gets that many more (setup). */
+#define PICTURE_QUEUE 3
+
+struct picture_job {
+	AVFrame *frame;
+	int frame_number;
+	bool recovery, keyframe;
+};
+
+static struct {
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t ready;
+	struct picture_job jobs[PICTURE_QUEUE];
+	int head, count;
+	bool running, stopping;
+} worker = {.lock = PTHREAD_MUTEX_INITIALIZER, .ready = PTHREAD_COND_INITIALIZER};
+
+static void *picture_worker(void *arg)
+{
+	pthread_mutex_lock(&worker.lock);
+	for (;;) {
+		while (worker.count == 0 && !worker.stopping)
+			pthread_cond_wait(&worker.ready, &worker.lock);
+		/* Stopping finishes what's queued, so the summary counts every frame handed over. */
+		if (worker.count == 0)
+			break;
+		struct picture_job job = worker.jobs[worker.head];
+		pthread_mutex_unlock(&worker.lock);
+		struct picture_result r;
+		uint64_t start = LiGetMicroseconds();
+		check_picture(job.frame, &r);
+		record_picture(job.frame_number, job.recovery, job.keyframe, &r, r.readable && r.worst > picture_threshold,
+			       (LiGetMicroseconds() - start) / 1000.0);
+		av_frame_free(&job.frame);
+		pthread_mutex_lock(&worker.lock);
+		worker.head = (worker.head + 1) % PICTURE_QUEUE;
+		worker.count--;
+	}
+	pthread_mutex_unlock(&worker.lock);
+	return NULL;
+}
+
+/* Hand a decoded frame to the worker, or count it skipped when the queue is full. */
+static void queue_picture(const AVFrame *f, int frame_number, bool recovery, bool keyframe)
+{
+	pthread_mutex_lock(&worker.lock);
+	if (!worker.running) {
+		worker.running = pthread_create(&worker.thread, NULL, picture_worker, NULL) == 0;
+		worker.stopping = false;
+	}
+	AVFrame *ref = worker.count < PICTURE_QUEUE ? av_frame_clone(f) : NULL;
+	if (ref == NULL) {
+		pthread_mutex_unlock(&worker.lock);
+		record_picture_skipped();
+		return;
+	}
+	worker.jobs[(worker.head + worker.count) % PICTURE_QUEUE] =
+		(struct picture_job){.frame = ref, .frame_number = frame_number, .recovery = recovery, .keyframe = keyframe};
+	worker.count++;
+	pthread_cond_signal(&worker.ready);
+	pthread_mutex_unlock(&worker.lock);
+}
+
+/* Let the worker finish the queue, and stop it. */
+static void stop_picture_worker(void)
+{
+	pthread_mutex_lock(&worker.lock);
+	bool running = worker.running;
+	worker.stopping = true;
+	pthread_cond_signal(&worker.ready);
+	pthread_mutex_unlock(&worker.lock);
+	if (running)
+		pthread_join(worker.thread, NULL);
+	worker.running = false;
+}
+
 bool decode_set_dump(const char *path)
 {
 	dump = fopen(path, "wb");
@@ -274,6 +355,9 @@ static int setup(int video_format, int width, int height, int fps, void *context
 		}
 		ctx->hw_device_ctx = av_buffer_ref(hw_ctx);
 		ctx->get_format = pick_vaapi;
+		/* Surfaces for the frames waiting to be checked, besides the decoder's own. */
+		if (picture_threshold > 0)
+			ctx->extra_hw_frames = PICTURE_QUEUE + 1;
 	} else {
 		ctx->thread_type = FF_THREAD_SLICE;
 		ctx->thread_count = 4;
@@ -293,6 +377,7 @@ static int setup(int video_format, int width, int height, int fps, void *context
 
 static void cleanup(void)
 {
+	stop_picture_worker();
 	av_frame_free(&frame);
 	av_packet_free(&packet);
 	avcodec_free_context(&ctx);
@@ -383,14 +468,9 @@ static int submit(PDECODE_UNIT unit)
 	hold(row.decode_start_us);
 	row.decode_end_us = LiGetMicroseconds();
 	row.decode_status = err;
-	/* After the decode's own time is taken, so checking doesn't count as decoding. */
-	if (picture_threshold > 0 && err == 0 && row.width > 0) {
-		struct picture_result r;
-		uint64_t start = LiGetMicroseconds();
-		check_picture(frame, &r);
-		record_picture(row.frame_number, row.recovery, row.frame_type == FRAME_TYPE_IDR, &r,
-			       r.readable && r.worst > picture_threshold, (LiGetMicroseconds() - start) / 1000.0);
-	}
+	/* Checked on the worker's thread, after the decode's own time is taken. */
+	if (picture_threshold > 0 && err == 0 && row.width > 0)
+		queue_picture(frame, row.frame_number, row.recovery, row.frame_type == FRAME_TYPE_IDR);
 	record_frame(&row);
 	return err < 0 ? DR_NEED_IDR : DR_OK;
 }

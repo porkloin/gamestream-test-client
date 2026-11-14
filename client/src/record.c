@@ -285,6 +285,11 @@ void record_picture(int frame_number, bool recovery, bool keyframe, const struct
 		   pic_recovery_run, check_ms, (long long)wall_now_us());
 }
 
+void record_picture_skipped(void)
+{
+	pic.skipped++;
+}
+
 void picture_stats(struct picture_stats *out)
 {
 	*out = pic;

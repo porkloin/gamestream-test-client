@@ -179,8 +179,12 @@ struct picture_stats {
 	int corrupt_run_max, recovery_corrupt_max;
 	/* Frames whose stamp repeated the frame before's. */
 	int repeats;
+	/* Frames not checked: the checking thread was still busy with the frames before. */
+	int skipped;
 	double worst_p99, check_ms_p99;
 };
+/* A decoded frame left unchecked: the checking thread was behind (decode.c). */
+void record_picture_skipped(void);
 void picture_stats(struct picture_stats *out);
 
 /* Click-to-flash latency (click.c). */
