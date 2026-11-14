@@ -10,6 +10,9 @@ where, the caveats when reading the numbers, and the layout. README.md is the sh
 - `client/src/loss.c`: the loss injector, the `recvfrom` wrapper, and the counters for the requests the client sends.
 - `client/src/queue.c`: the delay queue (latency, jitter, reordering, duplicates, the bandwidth cap).
 - `client/src/click.c`: clicks and flash detection for `--click-every`.
+- `client/src/pattern.c`: framestamp's picture (the same function as its `shaders/pattern.frag`, in the same integer
+  arithmetic) and `--check-picture`'s comparison; `client/tests/test_pattern.c` checks it against framestamp's own test
+  vectors. Change it only with framestamp, and bump moonshine-test-headless's pins of both together.
 - `client/src/decode.c`: libavcodec decoding (Moonlight's FFmpeg path), in software or on VAAPI, corrupt-frame flags.
 - `client/src/record.c`: per-frame records, intervals, stalls, the CSV.
 - `client/src/test_client.h`: shared declarations.
