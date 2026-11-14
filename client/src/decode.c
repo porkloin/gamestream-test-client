@@ -28,6 +28,7 @@ static AVBufferRef *hw_ctx;
 static VAImage patch = {.image_id = VA_INVALID_ID}; /* the click detector's 32x32 patch, read back */
 static VAImage whole = {.image_id = VA_INVALID_ID}; /* --check-picture's whole frame, read back */
 static double picture_threshold; /* --check-picture: 0 off */
+static int picture_width, picture_height; /* the stream's size, which framestamp drew at */
 
 void decode_set_hw(const char *device)
 {
@@ -113,9 +114,11 @@ static double hw_patch_luma(const AVFrame *f)
 	return luma;
 }
 
-void decode_set_picture_check(double threshold)
+void decode_set_picture_check(double threshold, int width, int height)
 {
 	picture_threshold = threshold;
+	picture_width = width;
+	picture_height = height;
 }
 
 /* A VAAPI frame's luma, read back for --check-picture. */
@@ -183,12 +186,22 @@ static const uint8_t *va_rows(void *ctx, int y0, int h, int *stride)
 static void check_picture(const AVFrame *f, struct picture_result *r)
 {
 	memset(r, 0, sizeof *r);
+	/* framestamp drew at the stream's size; a frame decoded larger (padding rows an AV1 encoder left in) is checked in
+	 * its top left, and the size it came at recorded. One decoded smaller can't hold the picture. */
+	int width = picture_width > 0 ? picture_width : f->width, height = picture_height > 0 ? picture_height : f->height;
+	bool wrong = f->width != width || f->height != height;
+	if (f->width < width || f->height < height) {
+		r->decoded_width = f->width, r->decoded_height = f->height;
+		return;
+	}
 	if (f->format != AV_PIX_FMT_VAAPI) {
 		const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
 		int depth = desc ? desc->comp[0].depth : 8;
-		picture_check(f->data[0], f->linesize[0], depth, f->width, f->height, r);
+		picture_check(f->data[0], f->linesize[0], depth, width, height, r);
 		if (r->readable && r->worst > picture_threshold)
-			picture_dump(f->data[0], f->linesize[0], depth, f->width, f->height, r);
+			picture_dump(f->data[0], f->linesize[0], depth, width, height, r);
+		if (wrong)
+			r->decoded_width = f->width, r->decoded_height = f->height;
 		return;
 	}
 	enum AVPixelFormat sw = ((AVHWFramesContext *)f->hw_frames_ctx->data)->sw_format;
@@ -206,8 +219,10 @@ static void check_picture(const AVFrame *f, struct picture_result *r)
 		.copy_size = copy_size,
 	};
 	int depth = v.bytes == 2 ? 16 : 8;
-	picture_check_rows(va_rows, &v, depth, f->width, f->height, r);
+	picture_check_rows(va_rows, &v, depth, width, height, r);
 	copy = v.copy, copy_size = v.copy_size;
+	if (wrong)
+		r->decoded_width = f->width, r->decoded_height = f->height;
 	if (!(r->readable && r->worst > picture_threshold) || !picture_dumping())
 		return;
 	if (!va_image(v.display, &whole, v.fourcc, f->width, f->height) ||
@@ -216,7 +231,7 @@ static void check_picture(const AVFrame *f, struct picture_result *r)
 	void *data;
 	if (vaMapBuffer(v.display, whole.buf, &data) != VA_STATUS_SUCCESS)
 		return;
-	picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], depth, f->width, f->height, r);
+	picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], depth, width, height, r);
 	vaUnmapBuffer(v.display, whole.buf);
 }
 

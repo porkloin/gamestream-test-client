@@ -155,6 +155,9 @@ struct picture_result {
 	uint32_t frame, mode;
 	/* Luma levels off, on average over a tile: the worst tile's and the mean over the tiles. */
 	double worst, mean;
+	/* The decoded frame's size, when it isn't the stream's (an AV1 frame coded taller than the picture, its padding
+	 * rows left in: 1920x1088 for 1080p). The check is of the stream's picture in its top left. */
+	int decoded_width, decoded_height;
 };
 /* plane: luma, `depth` bits (a 16-bit plane keeps its bits high). */
 void picture_check(const uint8_t *plane, int stride, int depth, int width, int height, struct picture_result *out);
@@ -163,7 +166,7 @@ void picture_check(const uint8_t *plane, int stride, int depth, int width, int h
 typedef const uint8_t *(*picture_rows)(void *ctx, int y0, int h, int *stride);
 void picture_check_rows(picture_rows rows, void *ctx, int depth, int width, int height, struct picture_result *out);
 /* --check-picture: compare each decoded frame with framestamp's (decode.c), at most `threshold` levels off a tile. */
-void decode_set_picture_check(double threshold);
+void decode_set_picture_check(double threshold, int width, int height);
 /* --picture-dump DIR: the first 3 corrupt frames, decoded and expected luma side by side, as DIR/picture-N.pgm. */
 void picture_set_dump(const char *dir);
 /* Whether a corrupt frame now would be dumped (worth reading back whole). */
@@ -181,6 +184,8 @@ struct picture_stats {
 	int repeats;
 	/* Frames not checked: the checking thread was still busy with the frames before. */
 	int skipped;
+	/* Frames decoded at another size than the stream's, and the last such size. */
+	int wrong_size, wrong_width, wrong_height;
 	double worst_p99, check_ms_p99;
 };
 /* A decoded frame left unchecked: the checking thread was behind (decode.c). */
