@@ -158,10 +158,16 @@ struct picture_result {
 };
 /* plane: luma, `depth` bits (a 16-bit plane keeps its bits high). */
 void picture_check(const uint8_t *plane, int stride, int depth, int width, int height, struct picture_result *out);
+/* The same, reading only the rows it needs from `rows`: rows y0 to y0 + h - 1, as a pointer to row y0 and the stride
+ * (valid until the next call), or NULL when they can't be read. For a frame on the GPU, read back a strip at a time. */
+typedef const uint8_t *(*picture_rows)(void *ctx, int y0, int h, int *stride);
+void picture_check_rows(picture_rows rows, void *ctx, int depth, int width, int height, struct picture_result *out);
 /* --check-picture: compare each decoded frame with framestamp's (decode.c), at most `threshold` levels off a tile. */
 void decode_set_picture_check(double threshold);
 /* --picture-dump DIR: the first 3 corrupt frames, decoded and expected luma side by side, as DIR/picture-N.pgm. */
 void picture_set_dump(const char *dir);
+/* Whether a corrupt frame now would be dumped (worth reading back whole). */
+bool picture_dumping(void);
 void picture_dump(const uint8_t *plane, int stride, int depth, int width, int height, const struct picture_result *r);
 /* A checked frame (record.c): the --stats line, and the counts for the summary. */
 void record_picture(int frame_number, bool recovery, bool keyframe, const struct picture_result *r, bool corrupt,

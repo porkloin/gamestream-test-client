@@ -43,6 +43,20 @@ static void to_luma(void)
 	}
 }
 
+/* A row source that hands out only the rows asked for, in a buffer of their own, as a GPU readback does: reading past
+ * them would read the wrong picture. */
+static uint8_t strip_buf[64 * W];
+
+static const uint8_t *strip_rows(void *ctx, int y0, int h, int *stride)
+{
+	if (y0 < 0 || y0 + h > H || h > 64)
+		return NULL;
+	memset(strip_buf, 0, sizeof strip_buf);
+	memcpy(strip_buf, luma + (size_t)y0 * W, (size_t)h * W);
+	*stride = W;
+	return strip_buf;
+}
+
 int main(void)
 {
 	static const struct {
@@ -71,6 +85,11 @@ int main(void)
 	picture_check(luma, W, 8, W, H, &r);
 	CHECK(r.readable && r.frame == 330 && r.mode == PATTERN_FULL && r.worst < 2);
 
+	/* The same frame read a strip at a time: the same result. */
+	struct picture_result rs;
+	picture_check_rows(strip_rows, NULL, 8, W, H, &rs);
+	CHECK(rs.readable && rs.frame == r.frame && rs.mode == r.mode && rs.worst == r.worst && rs.mean == r.mean);
+
 	/* The frame before it, decoded as this one: the stamp says 330, the picture is 329's. A moving scene off by a frame
 	 * is off by more than encoding. */
 	draw(329, PATTERN_FULL);
@@ -91,6 +110,8 @@ int main(void)
 		memset(luma + (size_t)y * W, 128, W);
 	picture_check(luma, W, 8, W, H, &r);
 	CHECK(r.readable && r.worst > 20);
+	picture_check_rows(strip_rows, NULL, 8, W, H, &rs);
+	CHECK(rs.readable && rs.worst == r.worst);
 
 	/* No stamp: unreadable. */
 	memset(luma, 90, sizeof luma);

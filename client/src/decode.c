@@ -117,7 +117,68 @@ void decode_set_picture_check(double threshold)
 	picture_threshold = threshold;
 }
 
-/* --check-picture on a decoded frame: its luma plane, read back from the GPU for a VAAPI frame. */
+/* A VAAPI frame's luma, read back for --check-picture. */
+struct va_rows {
+	VADisplay display;
+	VASurfaceID surface;
+	unsigned fourcc;
+	int width, height, bytes; /* bytes a sample */
+	VAImage *image;
+	uint8_t *copy;
+	size_t copy_size;
+};
+
+static VAImage strip = {.image_id = VA_INVALID_ID}; /* --check-picture's strip, reused frame to frame */
+
+/* (Re)create `img` as a fourcc image of at least width x height. */
+static bool va_image(VADisplay display, VAImage *img, unsigned fourcc, int width, int height)
+{
+	if (img->image_id != VA_INVALID_ID && img->format.fourcc == fourcc && img->width >= width &&
+	    img->height >= height)
+		return true;
+	if (img->image_id != VA_INVALID_ID)
+		vaDestroyImage(display, img->image_id);
+	img->image_id = VA_INVALID_ID;
+	VAImageFormat format = {.fourcc = fourcc, .byte_order = VA_LSB_FIRST,
+				.bits_per_pixel = fourcc == VA_FOURCC_P010 ? 24 : 12};
+	if (vaCreateImage(display, &format, width, height, img) != VA_STATUS_SUCCESS) {
+		img->image_id = VA_INVALID_ID;
+		return false;
+	}
+	return true;
+}
+
+/* Rows y0 to y0 + h - 1 of the surface's luma, copied out of a strip read back from the GPU (NV12 and P010 strips
+ * start on an even row and are an even number of rows). */
+static const uint8_t *va_rows(void *ctx, int y0, int h, int *stride)
+{
+	struct va_rows *v = ctx;
+	int y = y0 & ~1, rows = (y0 + h - y + 1) & ~1;
+	if (y < 0 || y + rows > v->height)
+		return NULL;
+	/* One image for every strip: at least 64 rows, so the stamp's strip (two cells, 64 rows at 4K) fits too. */
+	if (!va_image(v->display, v->image, v->fourcc, v->width, rows > 64 ? rows : 64))
+		return NULL;
+	if (vaGetImage(v->display, v->surface, 0, y, v->width, rows, v->image->image_id) != VA_STATUS_SUCCESS)
+		return NULL;
+	void *data;
+	if (vaMapBuffer(v->display, v->image->buf, &data) != VA_STATUS_SUCCESS)
+		return NULL;
+	size_t line = (size_t)v->width * v->bytes, need = line * rows;
+	if (need > v->copy_size) {
+		v->copy = realloc(v->copy, need);
+		v->copy_size = need;
+	}
+	const uint8_t *luma = (const uint8_t *)data + v->image->offsets[0];
+	for (int r = 0; r < rows; r++)
+		memcpy(v->copy + line * r, luma + (size_t)v->image->pitches[0] * r, line);
+	vaUnmapBuffer(v->display, v->image->buf);
+	*stride = (int)line;
+	return v->copy + line * (y0 - y);
+}
+
+/* --check-picture on a decoded frame: its luma plane in memory, or for a VAAPI frame the strips the check reads, read
+ * back from the GPU. A corrupt frame with --picture-dump is read back whole, to be written out. */
 static void check_picture(const AVFrame *f, struct picture_result *r)
 {
 	memset(r, 0, sizeof *r);
@@ -129,33 +190,33 @@ static void check_picture(const AVFrame *f, struct picture_result *r)
 			picture_dump(f->data[0], f->linesize[0], depth, f->width, f->height, r);
 		return;
 	}
-	VADisplay display = va_display();
 	enum AVPixelFormat sw = ((AVHWFramesContext *)f->hw_frames_ctx->data)->sw_format;
-	unsigned fourcc = sw == AV_PIX_FMT_P010 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
-	if (whole.image_id == VA_INVALID_ID || whole.format.fourcc != fourcc || whole.width != f->width ||
-	    whole.height != f->height) {
-		if (whole.image_id != VA_INVALID_ID)
-			vaDestroyImage(display, whole.image_id);
-		whole.image_id = VA_INVALID_ID;
-		VAImageFormat format = {.fourcc = fourcc, .byte_order = VA_LSB_FIRST,
-					.bits_per_pixel = fourcc == VA_FOURCC_P010 ? 24 : 12};
-		if (vaCreateImage(display, &format, f->width, f->height, &whole) != VA_STATUS_SUCCESS) {
-			whole.image_id = VA_INVALID_ID;
-			return;
-		}
-	}
-	if (vaGetImage(display, (VASurfaceID)(uintptr_t)f->data[3], 0, 0, f->width, f->height, whole.image_id) !=
-	    VA_STATUS_SUCCESS)
+	static uint8_t *copy;
+	static size_t copy_size;
+	struct va_rows v = {
+		.display = va_display(),
+		.surface = (VASurfaceID)(uintptr_t)f->data[3],
+		.fourcc = sw == AV_PIX_FMT_P010 ? VA_FOURCC_P010 : VA_FOURCC_NV12,
+		.width = f->width,
+		.height = f->height,
+		.bytes = sw == AV_PIX_FMT_P010 ? 2 : 1,
+		.image = &strip,
+		.copy = copy,
+		.copy_size = copy_size,
+	};
+	int depth = v.bytes == 2 ? 16 : 8;
+	picture_check_rows(va_rows, &v, depth, f->width, f->height, r);
+	copy = v.copy, copy_size = v.copy_size;
+	if (!(r->readable && r->worst > picture_threshold) || !picture_dumping())
+		return;
+	if (!va_image(v.display, &whole, v.fourcc, f->width, f->height) ||
+	    vaGetImage(v.display, v.surface, 0, 0, f->width, f->height, whole.image_id) != VA_STATUS_SUCCESS)
 		return;
 	void *data;
-	if (vaMapBuffer(display, whole.buf, &data) != VA_STATUS_SUCCESS)
+	if (vaMapBuffer(v.display, whole.buf, &data) != VA_STATUS_SUCCESS)
 		return;
-	picture_check((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], fourcc == VA_FOURCC_P010 ? 16 : 8,
-		      f->width, f->height, r);
-	if (r->readable && r->worst > picture_threshold)
-		picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0],
-			     fourcc == VA_FOURCC_P010 ? 16 : 8, f->width, f->height, r);
-	vaUnmapBuffer(display, whole.buf);
+	picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], depth, f->width, f->height, r);
+	vaUnmapBuffer(v.display, whole.buf);
 }
 
 bool decode_set_dump(const char *path)
@@ -241,6 +302,9 @@ static void cleanup(void)
 	if (hw_ctx != NULL && whole.image_id != VA_INVALID_ID)
 		vaDestroyImage(va_display(), whole.image_id);
 	whole.image_id = VA_INVALID_ID;
+	if (hw_ctx != NULL && strip.image_id != VA_INVALID_ID)
+		vaDestroyImage(va_display(), strip.image_id);
+	strip.image_id = VA_INVALID_ID;
 	av_buffer_unref(&hw_ctx);
 	if (dump != NULL)
 		fclose(dump);
