@@ -144,6 +144,39 @@ void record_display(int frame_number, uint64_t decoded_us, const struct display_
 		    const struct display_shown *paced);
 void record_display_summary(int fps, const struct display_stats *vsync, const struct display_stats *paced);
 
+/* framestamp's picture (pattern.c): what it draws at a pixel of frame `frame` in `mode` at width x height, and
+ * --check-picture's comparison of a decoded luma plane with it. */
+enum { PATTERN_STATIC = 0, PATTERN_REGION = 1, PATTERN_FULL = 2 };
+/* Returns whether the pixel is a particle: noise new every frame, which the check leaves out. */
+bool pattern_rgb(uint32_t width, uint32_t height, uint32_t frame, uint32_t mode, uint32_t x, uint32_t y, uint8_t c[3]);
+struct picture_result {
+	/* The stamp read: false when the picture has none (another app, or too broken to read). */
+	bool readable;
+	uint32_t frame, mode;
+	/* Luma levels off, on average over a tile: the worst tile's and the mean over the tiles. */
+	double worst, mean;
+};
+/* plane: luma, `depth` bits (a 16-bit plane keeps its bits high). */
+void picture_check(const uint8_t *plane, int stride, int depth, int width, int height, struct picture_result *out);
+/* --check-picture: compare each decoded frame with framestamp's (decode.c), at most `threshold` levels off a tile. */
+void decode_set_picture_check(double threshold);
+/* --picture-dump DIR: the first 3 corrupt frames, decoded and expected luma side by side, as DIR/picture-N.pgm. */
+void picture_set_dump(const char *dir);
+void picture_dump(const uint8_t *plane, int stride, int depth, int width, int height, const struct picture_result *r);
+/* A checked frame (record.c): the --stats line, and the counts for the summary. */
+void record_picture(int frame_number, bool recovery, bool keyframe, const struct picture_result *r, bool corrupt,
+		    double check_ms);
+struct picture_stats {
+	int checked, unreadable, corrupt;
+	/* The longest run of corrupt frames, and the longest that began at a recovery frame or keyframe: a frame the
+	 * stream should be whole again from. */
+	int corrupt_run_max, recovery_corrupt_max;
+	/* Frames whose stamp repeated the frame before's. */
+	int repeats;
+	double worst_p99, check_ms_p99;
+};
+void picture_stats(struct picture_stats *out);
+
 /* Click-to-flash latency (click.c). */
 struct click_stats {
 	int clicks, flashes, missed;

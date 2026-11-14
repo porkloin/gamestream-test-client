@@ -10,6 +10,9 @@ where, the caveats when reading the numbers, and the layout. README.md is the sh
 - `client/src/loss.c`: the loss injector, the `recvfrom` wrapper, and the counters for the requests the client sends.
 - `client/src/queue.c`: the delay queue (latency, jitter, reordering, duplicates, the bandwidth cap).
 - `client/src/click.c`: clicks and flash detection for `--click-every`.
+- `client/src/pattern.c`: framestamp's picture (the same function as its `shaders/pattern.frag`, in the same integer
+  arithmetic) and `--check-picture`'s comparison; `client/tests/test_pattern.c` checks it against framestamp's own test
+  vectors. Change it only with framestamp, and bump moonshine-test-headless's pins of both together.
 - `client/src/decode.c`: libavcodec decoding (Moonlight's FFmpeg path), in software or on VAAPI, corrupt-frame flags.
 - `client/src/record.c`: per-frame records, intervals, stalls, the CSV.
 - `client/src/test_client.h`: shared declarations.
@@ -181,6 +184,10 @@ requests idr=0 rfi=14 recovery=5
 | `ack_requested_frames` | frames the host asked the client to acknowledge (counted in the `connectionReceivedCompleteFrame` wrapper) |
 | `idr_requests`, `rfi_requests` | keyframe and reference-frame-invalidation requests the client sent |
 | `idr_requests_start`, `idr_requests_loss`, `idr_requests_drop_limit`, `idr_requests_rfi_overflow`, `idr_requests_client_decoder`, `idr_requests_client_queue` | the keyframe requests by why: moonlight-common-c logs a reason, then asks, and requests made before one goes out are sent as one, so each takes the most telling reason logged since the last. `start`: none logged (the stream's first). `loss`: frames lost that it couldn't recover by invalidation (no RFI for the codec, or still waiting for a keyframe). `drop_limit`: 120 frames in a row dropped while waiting to recover. `rfi_overflow`: more lost ranges than it can ask to invalidate. `client_decoder`: the decoder failed a frame (`DR_NEED_IDR`). `client_queue`: moonlight-common-c's queue of 15 frames waiting for the decoder overflowed, so the decoder couldn't keep up. The client's own reasons win over the stream's: the last two are this machine's doing, not the host's |
+| `picture_checked`, `picture_unreadable`, `picture_corrupt` | with `--check-picture`: frames checked against framestamp's, ones whose stamp couldn't be read (not framestamp, or too broken), and corrupt ones: the worst of 84 tiles off by more than `--picture-threshold` (20) luma levels on average from the frame framestamp drew (null without) |
+| `picture_corrupt_run_max`, `picture_recovery_corrupt_max` | the longest run of corrupt frames, and the longest from a recovery frame or keyframe on (1: that frame itself didn't make the picture whole) |
+| `picture_repeats` | frames whose stamp was the same as the frame before's (the compositor captured one of framestamp's frames twice) |
+| `picture_worst_p99`, `picture_check_ms_p99` | the worst tile's error at p99 (clean streams are a level or two), and the time the check takes a frame, after the decode (it isn't counted as decoding) |
 | `queued_max` | the most frames waiting behind one as it went to the decoder (moonlight-common-c's queue holds 15; it overflows past that) |
 
 `--expect` names are these fields. `--csv` writes one row per frame handed to the decoder; its `recovery` column is 1 for
@@ -195,7 +202,9 @@ written whole by any thread: `drop` (the loss model started dropping `frame_numb
 their first packets; `recovered_by` recovery_frame, keyframe or neither), `click` (its id, the frame the flash was decoded from as `flash_frame`, and when the click was sent and its flash
 decoded and received) and `second` (each second of the stream from the first frame's arrival: its `bytes` and
 `frames`, the busiest sliding one-second window so far as `peak_window_bytes`, as the report measures it, and the
-`requested_kbps`), and `idr_request` (a keyframe request sent, its `cause` as in `idr_requests_*`). Frame lines
+`requested_kbps`), `idr_request` (a keyframe request sent, its `cause` as in `idr_requests_*`), and with `--check-picture` a
+`picture` line per decoded frame (`readable`, the `stamp` it read, the `worst` and `mean` tile error, `corrupt`,
+`recovery_run`: corrupt frames in a row since a recovery frame or keyframe, and `check_ms`). Frame lines
 carry `queued` too. The first line is `client` (its `version`, as `--version`). Once the stream ends, the display model
 adds a `display` line per decoded frame (its `frame_number`, `decoded_unix_us`, and for V-Sync and the frame pacer
 `vsync_wait_us`/`paced_wait_us`, decoded to on screen, null when the frame was dropped and never shown, and

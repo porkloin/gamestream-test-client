@@ -234,6 +234,68 @@ void record_frame(const struct frame_row *r)
 	}
 }
 
+static int compare(const void *a, const void *b);
+
+/* --check-picture's counts. */
+static struct picture_stats pic;
+static double *pic_worst, *pic_ms;
+static size_t pic_n, pic_cap;
+static int pic_run, pic_recovery_run, pic_last_stamp = -1;
+static bool pic_in_recovery;
+
+void record_picture(int frame_number, bool recovery, bool keyframe, const struct picture_result *r, bool corrupt,
+		    double check_ms)
+{
+	pic.checked++;
+	if (pic_n == pic_cap) {
+		pic_cap = pic_cap ? pic_cap * 2 : 4096;
+		pic_worst = realloc(pic_worst, pic_cap * sizeof *pic_worst);
+		pic_ms = realloc(pic_ms, pic_cap * sizeof *pic_ms);
+	}
+	pic_ms[pic_n] = check_ms;
+	pic_worst[pic_n++] = r->worst;
+	if (!r->readable) {
+		pic.unreadable++;
+	} else {
+		if ((int64_t)r->frame == pic_last_stamp)
+			pic.repeats++;
+		pic_last_stamp = r->frame;
+		/* A run of corrupt frames; one that starts at (or runs through) a recovery frame or keyframe is the stream
+		 * not coming back whole when it should have. */
+		if (recovery || keyframe)
+			pic_in_recovery = true;
+		if (corrupt) {
+			pic.corrupt++;
+			pic_run++;
+			if (pic_run > pic.corrupt_run_max)
+				pic.corrupt_run_max = pic_run;
+			if (pic_in_recovery) {
+				pic_recovery_run++;
+				if (pic_recovery_run > pic.recovery_corrupt_max)
+					pic.recovery_corrupt_max = pic_recovery_run;
+			}
+		} else {
+			pic_run = pic_recovery_run = 0;
+			pic_in_recovery = false;
+		}
+	}
+	stats_line("{\"type\":\"picture\",\"frame_number\":%d,\"readable\":%s,\"stamp\":%u,\"worst\":%.2f,"
+		   "\"mean\":%.2f,\"corrupt\":%s,\"recovery_run\":%d,\"check_ms\":%.3f,\"unix_us\":%lld}\n",
+		   frame_number, r->readable ? "true" : "false", r->frame, r->worst, r->mean, corrupt ? "true" : "false",
+		   pic_recovery_run, check_ms, (long long)wall_now_us());
+}
+
+void picture_stats(struct picture_stats *out)
+{
+	*out = pic;
+	if (pic_n > 0) {
+		qsort(pic_worst, pic_n, sizeof(double), compare);
+		qsort(pic_ms, pic_n, sizeof(double), compare);
+		out->worst_p99 = pic_worst[(pic_n - 1) * 99 / 100];
+		out->check_ms_p99 = pic_ms[(pic_n - 1) * 99 / 100];
+	}
+}
+
 void record_idr_request(const char *cause)
 {
 	stats_line("{\"type\":\"idr_request\",\"cause\":\"%s\",\"unix_us\":%lld}\n", cause, (long long)wall_now_us());

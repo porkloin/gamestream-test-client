@@ -56,6 +56,7 @@ podman pull ghcr.io/porkloin/gamestream-test-client
 | Slow decoder | `--decode-delay MS` | `--decode-delay 20` | At least MS per frame |
 | Click-to-flash latency | `--click-every MS` | `--click-every 1000` | With [clickflash](https://github.com/porkloin/clickflash) as the app |
 | Display refresh rate | `--display HZ` | `--display 144` | The display the summary models (default: the stream's frame rate) |
+| Picture checks | `--check-picture` | `stream framestamp --check-picture` | With [framestamp](https://github.com/porkloin/framestamp) as the app: every decoded frame is drawn again from its stamp and compared, so corruption the decoder doesn't report shows. `--picture-dump DIR` saves the first corrupt frames beside what they should be |
 | Old client | `--no-rfi`, `--no-ack` | `--no-rfi` | No reference frame invalidation, no frame acks |
 | H.264 invalidation | `--rfi-h264` | `--rfi-h264` | As some Android decoders offer |
 
