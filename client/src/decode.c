@@ -214,6 +214,7 @@ static int submit(PDECODE_UNIT unit)
 		.rtp_timestamp = unit->rtpTimestamp,
 		.decode_start_us = LiGetMicroseconds(),
 		.recovery = is_recovery_frame(unit->frameNumber),
+		.queued = LiGetPendingVideoFrames(),
 	};
 	if (!enabled) {
 		hold(row.decode_start_us);

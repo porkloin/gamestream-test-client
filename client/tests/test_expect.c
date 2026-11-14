@@ -58,8 +58,27 @@ static void test_holds(void)
 	CHECK(holds(OP_LT, 0, 1));
 }
 
+/* Each keyframe request goes to the most telling reason logged before it: the client's own over lost frames. */
+static void test_idr_causes(void)
+{
+	on_log("IDR frame request sent\n");
+	on_log("Network dropped %d frames (frames %d to %d)\n", 2, 10, 11);
+	on_log("IDR frame request sent\n");
+	on_log("Network dropped 1 frame (frame %d)\n", 20);
+	on_log("Video decode unit queue overflow\n");
+	on_log("Waiting for IDR frame\n");
+	on_log("IDR frame request sent\n");
+	on_log("Requesting IDR frame on behalf of DR\n");
+	on_log("IDR frame request sent\n");
+	CHECK(idr_requests == 4);
+	CHECK(idr_by_cause[CAUSE_NONE] == 1 && idr_by_cause[CAUSE_LOSS] == 1);
+	CHECK(idr_by_cause[CAUSE_CLIENT_QUEUE] == 1 && idr_by_cause[CAUSE_CLIENT_DECODER] == 1);
+	CHECK(atomic_load(&idr_cause_pending) == CAUSE_NONE);
+}
+
 int main(void)
 {
+	test_idr_causes();
 	test_parse();
 	test_rejects();
 	test_holds();
