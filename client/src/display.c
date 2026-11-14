@@ -7,8 +7,10 @@
  *   less 3 ms for one, and it goes on screen at the refresh after; the pacing queue keeps 1, or 3 while it has
  *   recently held one or none and the stream runs at the refresh rate or faster.
  *
- * Both queues hold at most 3. Rendering itself takes no time here. The first refresh is half a refresh after the
- * first frame: neither the best nor the worst phase, and the stream's clock drifts against the display's anyway. */
+ * Both queues hold at most 3. Rendering itself takes no time here. The refreshes fall half a refresh after where
+ * frames typically arrive within one (the median of each frame's offset into the refresh): neither the best nor the
+ * worst phase, and the same from run to run. Timing them from the first frame instead would make the phase that
+ * frame's luck: it's the keyframe, decoded slower than the rest, and the latency would wander by up to a refresh. */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +39,26 @@ static int compare(const void *a, const void *b)
 {
 	double x = *(const double *)a, y = *(const double *)b;
 	return (x > y) - (x < y);
+}
+
+/* When the first refresh is: half a refresh after where frames typically arrive within a refresh (each frame's offset
+ * from the first, into a refresh, as -period/2 to period/2, then the median), at or after the first frame. */
+static double first_refresh(const uint64_t *ready, size_t n, double period)
+{
+	double *offset = malloc(n * sizeof *offset);
+	for (size_t i = 0; i < n; i++) {
+		double o = fmod((double)(ready[i] - ready[0]), period);
+		offset[i] = o >= period / 2 ? o - period : o;
+	}
+	qsort(offset, n, sizeof *offset, compare);
+	double typical = offset[(n - 1) / 2];
+	free(offset);
+	double start = (double)ready[0] + typical + period / 2;
+	while (start - period >= (double)ready[0])
+		start -= period;
+	while (start < (double)ready[0])
+		start += period;
+	return start;
 }
 
 /* A queue of frame indices, oldest first. */
@@ -102,7 +124,7 @@ void display_simulate(const uint64_t *ready, size_t n, int fps, int hz, bool pac
 	struct history history = {.cap = paced ? hz / 2 : fps / 2};
 	history.len = calloc(history.cap > 0 ? (size_t)history.cap : 1, sizeof *history.len);
 	double *latency = malloc(n * sizeof *latency);
-	double start = (double)ready[0] + period / 2;
+	double start = first_refresh(ready, n, period);
 	struct queue q = {0};
 	size_t next = 0, shown = 0;
 	long last_shown = -1;
