@@ -36,6 +36,7 @@ static double *intervals_ms;
 static size_t intervals, intervals_cap;
 static double *decodes_ms;
 static size_t decodes, decodes_cap;
+static int queued_max;
 
 static FILE *stats;
 static pthread_mutex_t stats_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -130,7 +131,7 @@ bool record_open(const char *path, const char *stats_path)
 			return false;
 		fprintf(csv, "frame_number,frame_type,bytes,host_latency_ms,receive_us,enqueue_us,"
 			     "decode_start_us,decode_end_us,rtp_timestamp,decode_status,width,height,recovery,"
-			     "receive_unix_us\n");
+			     "receive_unix_us,queued\n");
 	}
 	return true;
 }
@@ -145,21 +146,22 @@ static int64_t wall_offset_us(void)
 void record_frame(const struct frame_row *r)
 {
 	if (csv != NULL)
-		fprintf(csv, "%d,%d,%d,%.1f,%llu,%llu,%llu,%llu,%u,%d,%d,%d,%d,%lld\n", r->frame_number,
+		fprintf(csv, "%d,%d,%d,%.1f,%llu,%llu,%llu,%llu,%u,%d,%d,%d,%d,%lld,%d\n", r->frame_number,
 			r->frame_type, r->bytes, r->host_latency_ms, (unsigned long long)r->receive_us,
 			(unsigned long long)r->enqueue_us, (unsigned long long)r->decode_start_us,
 			(unsigned long long)r->decode_end_us, r->rtp_timestamp, r->decode_status,
 			r->width, r->height, r->recovery,
-			(long long)((int64_t)r->receive_us + wall_offset_us()));
+			(long long)((int64_t)r->receive_us + wall_offset_us()), r->queued);
 	int64_t wall = wall_offset_us();
 	if (stats != NULL) {
 		stats_line(
 			"{\"type\":\"frame\",\"frame_number\":%d,\"frame_type\":%d,\"bytes\":%d,"
 			"\"receive_unix_us\":%lld,\"enqueue_unix_us\":%lld,\"decode_start_unix_us\":%lld,"
-			"\"decode_end_unix_us\":%lld,\"decode_status\":%d,\"recovery\":%s}\n",
+			"\"decode_end_unix_us\":%lld,\"decode_status\":%d,\"recovery\":%s,\"queued\":%d}\n",
 			r->frame_number, r->frame_type, r->bytes, (long long)((int64_t)r->receive_us + wall),
 			(long long)((int64_t)r->enqueue_us + wall), (long long)((int64_t)r->decode_start_us + wall),
-			(long long)((int64_t)r->decode_end_us + wall), r->decode_status, r->recovery ? "true" : "false");
+			(long long)((int64_t)r->decode_end_us + wall), r->decode_status, r->recovery ? "true" : "false",
+			r->queued);
 	}
 	if (stats != NULL) {
 		/* Seconds counted from the first frame's arrival; a second is written when a frame arrives after it. */
@@ -191,6 +193,8 @@ void record_frame(const struct frame_row *r)
 			peak_window = win_total;
 	}
 	frames++;
+	if (r->queued > queued_max)
+		queued_max = r->queued;
 	if (r->frame_type == FRAME_TYPE_IDR)
 		idr_frames++;
 	if (r->decode_status < 0)
@@ -228,6 +232,11 @@ void record_frame(const struct frame_row *r)
 		}
 		decodes_ms[decodes++] = (r->decode_end_us - r->decode_start_us) / 1000.0;
 	}
+}
+
+void record_idr_request(const char *cause)
+{
+	stats_line("{\"type\":\"idr_request\",\"cause\":\"%s\",\"unix_us\":%lld}\n", cause, (long long)wall_now_us());
 }
 
 void record_display(int frame_number, uint64_t decoded_us, const struct display_shown *vsync,
@@ -306,6 +315,7 @@ void record_stats(struct record_stats *out, int fps, uint64_t end_us)
 		out->decode_p99_ms = decodes_ms[(decodes - 1) * 99 / 100];
 		out->decode_max_ms = decodes_ms[decodes - 1];
 	}
+	out->queued_max = queued_max;
 }
 
 void record_summary(FILE *out, const struct record_stats *s)

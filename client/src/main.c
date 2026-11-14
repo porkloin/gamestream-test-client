@@ -32,6 +32,24 @@ static atomic_int terminate_error;
 static atomic_int idr_requests, rfi_requests, recovery_requests;
 static bool verbose;
 
+/* Why the client asked for keyframes. moonlight-common-c logs the reason, then asks; requests made before one is sent
+ * go out as one, so each sent request takes the most telling reason logged since the last: the client's own (its
+ * decode queue overflowing, its decoder failing) over the stream's (frames lost, loss it can't recover with
+ * invalidation). */
+enum idr_cause { CAUSE_NONE, CAUSE_LOSS, CAUSE_DROP_LIMIT, CAUSE_RFI_OVERFLOW, CAUSE_CLIENT_DECODER, CAUSE_CLIENT_QUEUE };
+static const char *const idr_cause_names[] = {"start", "loss", "drop_limit", "rfi_overflow", "client_decoder",
+					      "client_queue"};
+#define IDR_CAUSES (sizeof idr_cause_names / sizeof *idr_cause_names)
+static atomic_int idr_cause_pending;
+static atomic_int idr_by_cause[IDR_CAUSES];
+
+static void idr_cause(enum idr_cause cause)
+{
+	int was = atomic_load(&idr_cause_pending);
+	while ((int)cause > was && !atomic_compare_exchange_weak(&idr_cause_pending, &was, (int)cause))
+		;
+}
+
 static void on_terminated(int error)
 {
 	terminate_error = error;
@@ -40,8 +58,24 @@ static void on_terminated(int error)
 
 static void on_log(const char *format, ...)
 {
-	if (starts_with(format, "IDR frame request sent"))
+	if (starts_with(format, "IDR frame request sent")) {
 		idr_requests++;
+		/* Nothing logged before it: the stream's first, before any frame (or a reason this doesn't know, also
+		 * counted as start). */
+		int cause = atomic_exchange(&idr_cause_pending, CAUSE_NONE);
+		idr_by_cause[cause]++;
+		record_idr_request(idr_cause_names[cause]);
+	} else if (starts_with(format, "Video decode unit queue overflow"))
+		idr_cause(CAUSE_CLIENT_QUEUE);
+	else if (starts_with(format, "Requesting IDR frame on behalf of DR"))
+		idr_cause(CAUSE_CLIENT_DECODER);
+	else if (starts_with(format, "RFI range list reached maximum size limit"))
+		idr_cause(CAUSE_RFI_OVERFLOW);
+	else if (starts_with(format, "Reached consecutive drop limit"))
+		idr_cause(CAUSE_DROP_LIMIT);
+	else if (starts_with(format, "Network dropped") || starts_with(format, "Depacketizer detected corrupt frame") ||
+		 starts_with(format, "Waiting for IDR frame"))
+		idr_cause(CAUSE_LOSS);
 	else if (starts_with(format, "Invalidate reference frame request sent"))
 		rfi_requests++;
 	else if (starts_with(format, "Next post-invalidation frame is:")) {
@@ -638,6 +672,13 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"recovery_frames", (double)recovery_requests, true},
 		{"ack_requested_frames", (double)loss_run.ack_frames, true},
 		{"idr_requests", (double)idr_requests, true},
+		{"idr_requests_start", (double)idr_by_cause[CAUSE_NONE], true},
+		{"idr_requests_loss", (double)idr_by_cause[CAUSE_LOSS], true},
+		{"idr_requests_drop_limit", (double)idr_by_cause[CAUSE_DROP_LIMIT], true},
+		{"idr_requests_rfi_overflow", (double)idr_by_cause[CAUSE_RFI_OVERFLOW], true},
+		{"idr_requests_client_decoder", (double)idr_by_cause[CAUSE_CLIENT_DECODER], true},
+		{"idr_requests_client_queue", (double)idr_by_cause[CAUSE_CLIENT_QUEUE], true},
+		{"queued_max", (double)rec.queued_max, rec.frames > 0},
 		{"rfi_requests", (double)rfi_requests, true},
 		{"clicks", clk.clicks, clicking},
 		{"click_flashes", clk.flashes, clicking},
@@ -655,6 +696,13 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		display_summary(stdout, &vsync, &paced);
 	printf("requests idr=%d rfi=%d recovery=%d\n", (int)idr_requests, (int)rfi_requests,
 		(int)recovery_requests);
+	if (idr_requests > 0) {
+		printf("idr_requests");
+		for (size_t i = 0; i < IDR_CAUSES; i++)
+			if (idr_by_cause[i] > 0)
+				printf(" %s=%d", idr_cause_names[i], (int)idr_by_cause[i]);
+		printf("\n");
+	}
 	if (clicking)
 		click_summary(stdout, &clk);
 	if (clock_ok && clock_end_ok)

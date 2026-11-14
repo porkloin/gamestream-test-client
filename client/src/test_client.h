@@ -65,6 +65,7 @@ struct frame_row {
 	int decode_status; /* 0 ok, else the libavcodec error */
 	int width, height;
 	bool recovery; /* the P-frame that recovers from a reference frame invalidation */
+	int queued; /* frames waiting behind it for the decoder when it went to it (moonlight-common-c's queue holds 15) */
 };
 /* csv: the per-frame CSV; stats: the same frames as JSON lines, flushed as written, times by the wall clock.
  * Either may be NULL. */
@@ -92,6 +93,8 @@ void record_version(const char *version);
 void record_drop(uint32_t frame_number);
 void record_click(int id, int frame_number, uint64_t sent_us, uint64_t decoded_us, uint64_t received_us);
 void record_frame(const struct frame_row *row);
+/* A keyframe request the client sent, and why (main.c's causes). */
+void record_idr_request(const char *cause);
 /* Frame number of a P-frame the host sent to recover from an invalidation; the depacketizer
  * names it before the frame reaches the decoder. */
 void record_recovery_frame(int frame_number);
@@ -107,6 +110,8 @@ struct record_stats {
 	/* Time to decode a frame, from handing it to the decoder to the picture being ready. */
 	size_t decodes;
 	double decode_p50_ms, decode_p95_ms, decode_p99_ms, decode_max_ms;
+	/* The most frames waiting for the decoder behind one going to it. */
+	int queued_max;
 };
 void record_stats(struct record_stats *out, int fps, uint64_t end_us);
 void record_summary(FILE *out, const struct record_stats *stats);
