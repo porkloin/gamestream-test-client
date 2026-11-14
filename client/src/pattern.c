@@ -154,6 +154,11 @@ void picture_set_dump(const char *dir)
 	dump_dir = dir;
 }
 
+bool picture_dumping(void)
+{
+	return dump_dir != NULL && dumped < 3;
+}
+
 void picture_dump(const uint8_t *plane, int stride, int depth, int width, int height, const struct picture_result *r)
 {
 	if (dump_dir == NULL || dumped >= 3 || !r->readable)
@@ -180,11 +185,36 @@ void picture_dump(const uint8_t *plane, int stride, int depth, int width, int he
 	fclose(f);
 }
 
+/* A plane in memory as a row source: its rows are already there. */
+struct plane_rows {
+	const uint8_t *plane;
+	int stride;
+};
+
+static const uint8_t *plane_rows(void *ctx, int y0, int h, int *stride)
+{
+	const struct plane_rows *p = ctx;
+	*stride = p->stride;
+	return p->plane + (size_t)y0 * p->stride;
+}
+
 void picture_check(const uint8_t *plane, int stride, int depth, int width, int height, struct picture_result *out)
+{
+	struct plane_rows p = {plane, stride};
+	picture_check_rows(plane_rows, &p, depth, width, height, out);
+}
+
+/* The rows it reads: the stamp's (0 to 2 cells) and 13 through each row of tiles, so a frame on the GPU is read back a
+ * strip at a time (about a twentieth of a 4K frame), not whole. */
+void picture_check_rows(picture_rows rows, void *ctx, int depth, int width, int height, struct picture_result *out)
 {
 	memset(out, 0, sizeof *out);
 	uint32_t s = height / 270 > 1 ? (uint32_t)height / 270u : 1u, cell = 4u * s;
 	if ((uint32_t)width < 36u * cell || (uint32_t)height < 2u * cell)
+		return;
+	int stride;
+	const uint8_t *plane = rows(ctx, 0, (int)(2 * cell), &stride);
+	if (plane == NULL)
 		return;
 	/* The stamp: each cell's two rows are a bit and its inverse, so the brighter one says which. */
 	uint32_t frame = 0, mode = 0;
@@ -216,9 +246,15 @@ void picture_check(const uint8_t *plane, int stride, int depth, int width, int h
 	/* Tiles over the particles are left out: noise new every frame doesn't survive encoding, by design. */
 	double worst[2] = {0, 0}, total[2] = {0, 0};
 	int tiles = 0;
-	for (int ty = 0; ty < TILES_Y; ty++)
+	for (int ty = 0; ty < TILES_Y; ty++) {
+		int y0 = height * (2 * ty + 1) / (2 * TILES_Y) - 8;
+		const uint8_t *strip = rows(ctx, y0, 13, &stride);
+		if (strip == NULL) {
+			out->readable = false;
+			return;
+		}
 		for (int tx = 0; tx < TILES_X; tx++) {
-			int x0 = width * (2 * tx + 1) / (2 * TILES_X) - 8, y0 = height * (2 * ty + 1) / (2 * TILES_Y) - 8;
+			int x0 = width * (2 * tx + 1) / (2 * TILES_X) - 8;
 			double err[2] = {0, 0};
 			bool particles = false;
 			for (int dy = 0; dy < 16 && !particles; dy += 4)
@@ -229,7 +265,7 @@ void picture_check(const uint8_t *plane, int stride, int depth, int width, int h
 						particles = true;
 						break;
 					}
-					double got = sample(plane, stride, depth, x, y);
+					double got = sample(strip, stride, depth, x, dy);
 					double y709 = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 					double y601 = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 					double e709 = got - (lo + (hi - lo) * y709 / 255.0), e601 = got - (lo + (hi - lo) * y601 / 255.0);
@@ -246,6 +282,7 @@ void picture_check(const uint8_t *plane, int stride, int depth, int width, int h
 					worst[m] = err[m];
 			}
 		}
+	}
 	int m = total[1] < total[0];
 	out->worst = worst[m];
 	out->mean = tiles > 0 ? total[m] / tiles : 0;

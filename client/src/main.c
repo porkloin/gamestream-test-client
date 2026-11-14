@@ -523,7 +523,7 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		return 2;
 	}
 	if (check_picture)
-		decode_set_picture_check(picture_threshold);
+		decode_set_picture_check(picture_threshold, width, height);
 	click_configure(click_every);
 	/* The VAAPI device: the one asked for, or the best that decodes this codec; none, software. */
 	struct gpu gpus[16];
@@ -687,6 +687,10 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"picture_corrupt_run_max", pic.corrupt_run_max, check_picture},
 		{"picture_recovery_corrupt_max", pic.recovery_corrupt_max, check_picture},
 		{"picture_repeats", pic.repeats, check_picture},
+		{"picture_skipped", pic.skipped, check_picture},
+		{"picture_wrong_size", pic.wrong_size, check_picture},
+		{"picture_decoded_width", pic.wrong_width, check_picture && pic.wrong_size > 0},
+		{"picture_decoded_height", pic.wrong_height, check_picture && pic.wrong_size > 0},
 		{"picture_worst_p99", pic.worst_p99, check_picture && pic.checked > pic.unreadable},
 		{"picture_check_ms_p99", pic.check_ms_p99, check_picture && pic.checked > 0},
 		{"display_hz", vsync.hz, displaying},
@@ -733,9 +737,12 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		display_summary(stdout, &vsync, &paced);
 	if (check_picture)
 		printf("picture checked=%d unreadable=%d corrupt=%d corrupt_run_max=%d recovery_corrupt_max=%d repeats=%d "
-		       "worst_p99=%.1f check_ms_p99=%.2f\n",
+		       "skipped=%d worst_p99=%.1f check_ms_p99=%.2f\n",
 		       pic.checked, pic.unreadable, pic.corrupt, pic.corrupt_run_max, pic.recovery_corrupt_max, pic.repeats,
-		       pic.worst_p99, pic.check_ms_p99);
+		       pic.skipped, pic.worst_p99, pic.check_ms_p99);
+	if (check_picture && pic.wrong_size > 0)
+		printf("picture wrong_size=%d decoded=%dx%d stream=%dx%d\n", pic.wrong_size, pic.wrong_width, pic.wrong_height,
+		       width, height);
 	printf("requests idr=%d rfi=%d recovery=%d\n", (int)idr_requests, (int)rfi_requests,
 		(int)recovery_requests);
 	if (idr_requests > 0) {

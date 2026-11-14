@@ -8,6 +8,7 @@
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
 #include <va/va.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -27,6 +28,7 @@ static AVBufferRef *hw_ctx;
 static VAImage patch = {.image_id = VA_INVALID_ID}; /* the click detector's 32x32 patch, read back */
 static VAImage whole = {.image_id = VA_INVALID_ID}; /* --check-picture's whole frame, read back */
 static double picture_threshold; /* --check-picture: 0 off */
+static int picture_width, picture_height; /* the stream's size, which framestamp drew at */
 
 void decode_set_hw(const char *device)
 {
@@ -112,50 +114,205 @@ static double hw_patch_luma(const AVFrame *f)
 	return luma;
 }
 
-void decode_set_picture_check(double threshold)
+void decode_set_picture_check(double threshold, int width, int height)
 {
 	picture_threshold = threshold;
+	picture_width = width;
+	picture_height = height;
 }
 
-/* --check-picture on a decoded frame: its luma plane, read back from the GPU for a VAAPI frame. */
+/* A VAAPI frame's luma, read back for --check-picture. */
+struct va_rows {
+	VADisplay display;
+	VASurfaceID surface;
+	unsigned fourcc;
+	int width, height, bytes; /* bytes a sample */
+	VAImage *image;
+	uint8_t *copy;
+	size_t copy_size;
+};
+
+static VAImage strip = {.image_id = VA_INVALID_ID}; /* --check-picture's strip, reused frame to frame */
+
+/* (Re)create `img` as a fourcc image of at least width x height. */
+static bool va_image(VADisplay display, VAImage *img, unsigned fourcc, int width, int height)
+{
+	if (img->image_id != VA_INVALID_ID && img->format.fourcc == fourcc && img->width >= width &&
+	    img->height >= height)
+		return true;
+	if (img->image_id != VA_INVALID_ID)
+		vaDestroyImage(display, img->image_id);
+	img->image_id = VA_INVALID_ID;
+	VAImageFormat format = {.fourcc = fourcc, .byte_order = VA_LSB_FIRST,
+				.bits_per_pixel = fourcc == VA_FOURCC_P010 ? 24 : 12};
+	if (vaCreateImage(display, &format, width, height, img) != VA_STATUS_SUCCESS) {
+		img->image_id = VA_INVALID_ID;
+		return false;
+	}
+	return true;
+}
+
+/* Rows y0 to y0 + h - 1 of the surface's luma, copied out of a strip read back from the GPU (NV12 and P010 strips
+ * start on an even row and are an even number of rows). */
+static const uint8_t *va_rows(void *ctx, int y0, int h, int *stride)
+{
+	struct va_rows *v = ctx;
+	int y = y0 & ~1, rows = (y0 + h - y + 1) & ~1;
+	if (y < 0 || y + rows > v->height)
+		return NULL;
+	/* One image for every strip: at least 64 rows, so the stamp's strip (two cells, 64 rows at 4K) fits too. */
+	if (!va_image(v->display, v->image, v->fourcc, v->width, rows > 64 ? rows : 64))
+		return NULL;
+	if (vaGetImage(v->display, v->surface, 0, y, v->width, rows, v->image->image_id) != VA_STATUS_SUCCESS)
+		return NULL;
+	void *data;
+	if (vaMapBuffer(v->display, v->image->buf, &data) != VA_STATUS_SUCCESS)
+		return NULL;
+	size_t line = (size_t)v->width * v->bytes, need = line * rows;
+	if (need > v->copy_size) {
+		v->copy = realloc(v->copy, need);
+		v->copy_size = need;
+	}
+	const uint8_t *luma = (const uint8_t *)data + v->image->offsets[0];
+	for (int r = 0; r < rows; r++)
+		memcpy(v->copy + line * r, luma + (size_t)v->image->pitches[0] * r, line);
+	vaUnmapBuffer(v->display, v->image->buf);
+	*stride = (int)line;
+	return v->copy + line * (y0 - y);
+}
+
+/* --check-picture on a decoded frame: its luma plane in memory, or for a VAAPI frame the strips the check reads, read
+ * back from the GPU. A corrupt frame with --picture-dump is read back whole, to be written out. */
 static void check_picture(const AVFrame *f, struct picture_result *r)
 {
 	memset(r, 0, sizeof *r);
+	/* framestamp drew at the stream's size; a frame decoded larger (padding rows an AV1 encoder left in) is checked in
+	 * its top left, and the size it came at recorded. One decoded smaller can't hold the picture. */
+	int width = picture_width > 0 ? picture_width : f->width, height = picture_height > 0 ? picture_height : f->height;
+	bool wrong = f->width != width || f->height != height;
+	if (f->width < width || f->height < height) {
+		r->decoded_width = f->width, r->decoded_height = f->height;
+		return;
+	}
 	if (f->format != AV_PIX_FMT_VAAPI) {
 		const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
 		int depth = desc ? desc->comp[0].depth : 8;
-		picture_check(f->data[0], f->linesize[0], depth, f->width, f->height, r);
+		picture_check(f->data[0], f->linesize[0], depth, width, height, r);
 		if (r->readable && r->worst > picture_threshold)
-			picture_dump(f->data[0], f->linesize[0], depth, f->width, f->height, r);
+			picture_dump(f->data[0], f->linesize[0], depth, width, height, r);
+		if (wrong)
+			r->decoded_width = f->width, r->decoded_height = f->height;
 		return;
 	}
-	VADisplay display = va_display();
 	enum AVPixelFormat sw = ((AVHWFramesContext *)f->hw_frames_ctx->data)->sw_format;
-	unsigned fourcc = sw == AV_PIX_FMT_P010 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
-	if (whole.image_id == VA_INVALID_ID || whole.format.fourcc != fourcc || whole.width != f->width ||
-	    whole.height != f->height) {
-		if (whole.image_id != VA_INVALID_ID)
-			vaDestroyImage(display, whole.image_id);
-		whole.image_id = VA_INVALID_ID;
-		VAImageFormat format = {.fourcc = fourcc, .byte_order = VA_LSB_FIRST,
-					.bits_per_pixel = fourcc == VA_FOURCC_P010 ? 24 : 12};
-		if (vaCreateImage(display, &format, f->width, f->height, &whole) != VA_STATUS_SUCCESS) {
-			whole.image_id = VA_INVALID_ID;
-			return;
-		}
-	}
-	if (vaGetImage(display, (VASurfaceID)(uintptr_t)f->data[3], 0, 0, f->width, f->height, whole.image_id) !=
-	    VA_STATUS_SUCCESS)
+	static uint8_t *copy;
+	static size_t copy_size;
+	struct va_rows v = {
+		.display = va_display(),
+		.surface = (VASurfaceID)(uintptr_t)f->data[3],
+		.fourcc = sw == AV_PIX_FMT_P010 ? VA_FOURCC_P010 : VA_FOURCC_NV12,
+		.width = f->width,
+		.height = f->height,
+		.bytes = sw == AV_PIX_FMT_P010 ? 2 : 1,
+		.image = &strip,
+		.copy = copy,
+		.copy_size = copy_size,
+	};
+	int depth = v.bytes == 2 ? 16 : 8;
+	picture_check_rows(va_rows, &v, depth, width, height, r);
+	copy = v.copy, copy_size = v.copy_size;
+	if (wrong)
+		r->decoded_width = f->width, r->decoded_height = f->height;
+	if (!(r->readable && r->worst > picture_threshold) || !picture_dumping())
+		return;
+	if (!va_image(v.display, &whole, v.fourcc, f->width, f->height) ||
+	    vaGetImage(v.display, v.surface, 0, 0, f->width, f->height, whole.image_id) != VA_STATUS_SUCCESS)
 		return;
 	void *data;
-	if (vaMapBuffer(display, whole.buf, &data) != VA_STATUS_SUCCESS)
+	if (vaMapBuffer(v.display, whole.buf, &data) != VA_STATUS_SUCCESS)
 		return;
-	picture_check((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], fourcc == VA_FOURCC_P010 ? 16 : 8,
-		      f->width, f->height, r);
-	if (r->readable && r->worst > picture_threshold)
-		picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0],
-			     fourcc == VA_FOURCC_P010 ? 16 : 8, f->width, f->height, r);
-	vaUnmapBuffer(display, whole.buf);
+	picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], depth, width, height, r);
+	vaUnmapBuffer(v.display, whole.buf);
+}
+
+/* --check-picture runs off the decoder's thread: the decoder hands each decoded frame (a reference to it, so its
+ * surface stays alive) to a worker that reads it back and checks it. The decoder waits for nothing; when the worker is
+ * behind and the queue full, the frame is skipped and counted instead. The queue's frames are surfaces held out of
+ * the decoder's pool, so the pool gets that many more (setup). */
+#define PICTURE_QUEUE 3
+
+struct picture_job {
+	AVFrame *frame;
+	int frame_number;
+	bool recovery, keyframe;
+};
+
+static struct {
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t ready;
+	struct picture_job jobs[PICTURE_QUEUE];
+	int head, count;
+	bool running, stopping;
+} worker = {.lock = PTHREAD_MUTEX_INITIALIZER, .ready = PTHREAD_COND_INITIALIZER};
+
+static void *picture_worker(void *arg)
+{
+	pthread_mutex_lock(&worker.lock);
+	for (;;) {
+		while (worker.count == 0 && !worker.stopping)
+			pthread_cond_wait(&worker.ready, &worker.lock);
+		/* Stopping finishes what's queued, so the summary counts every frame handed over. */
+		if (worker.count == 0)
+			break;
+		struct picture_job job = worker.jobs[worker.head];
+		pthread_mutex_unlock(&worker.lock);
+		struct picture_result r;
+		uint64_t start = LiGetMicroseconds();
+		check_picture(job.frame, &r);
+		record_picture(job.frame_number, job.recovery, job.keyframe, &r, r.readable && r.worst > picture_threshold,
+			       (LiGetMicroseconds() - start) / 1000.0);
+		av_frame_free(&job.frame);
+		pthread_mutex_lock(&worker.lock);
+		worker.head = (worker.head + 1) % PICTURE_QUEUE;
+		worker.count--;
+	}
+	pthread_mutex_unlock(&worker.lock);
+	return NULL;
+}
+
+/* Hand a decoded frame to the worker, or count it skipped when the queue is full. */
+static void queue_picture(const AVFrame *f, int frame_number, bool recovery, bool keyframe)
+{
+	pthread_mutex_lock(&worker.lock);
+	if (!worker.running) {
+		worker.running = pthread_create(&worker.thread, NULL, picture_worker, NULL) == 0;
+		worker.stopping = false;
+	}
+	AVFrame *ref = worker.count < PICTURE_QUEUE ? av_frame_clone(f) : NULL;
+	if (ref == NULL) {
+		pthread_mutex_unlock(&worker.lock);
+		record_picture_skipped();
+		return;
+	}
+	worker.jobs[(worker.head + worker.count) % PICTURE_QUEUE] =
+		(struct picture_job){.frame = ref, .frame_number = frame_number, .recovery = recovery, .keyframe = keyframe};
+	worker.count++;
+	pthread_cond_signal(&worker.ready);
+	pthread_mutex_unlock(&worker.lock);
+}
+
+/* Let the worker finish the queue, and stop it. */
+static void stop_picture_worker(void)
+{
+	pthread_mutex_lock(&worker.lock);
+	bool running = worker.running;
+	worker.stopping = true;
+	pthread_cond_signal(&worker.ready);
+	pthread_mutex_unlock(&worker.lock);
+	if (running)
+		pthread_join(worker.thread, NULL);
+	worker.running = false;
 }
 
 bool decode_set_dump(const char *path)
@@ -213,6 +370,9 @@ static int setup(int video_format, int width, int height, int fps, void *context
 		}
 		ctx->hw_device_ctx = av_buffer_ref(hw_ctx);
 		ctx->get_format = pick_vaapi;
+		/* Surfaces for the frames waiting to be checked, besides the decoder's own. */
+		if (picture_threshold > 0)
+			ctx->extra_hw_frames = PICTURE_QUEUE + 1;
 	} else {
 		ctx->thread_type = FF_THREAD_SLICE;
 		ctx->thread_count = 4;
@@ -232,6 +392,7 @@ static int setup(int video_format, int width, int height, int fps, void *context
 
 static void cleanup(void)
 {
+	stop_picture_worker();
 	av_frame_free(&frame);
 	av_packet_free(&packet);
 	avcodec_free_context(&ctx);
@@ -241,6 +402,9 @@ static void cleanup(void)
 	if (hw_ctx != NULL && whole.image_id != VA_INVALID_ID)
 		vaDestroyImage(va_display(), whole.image_id);
 	whole.image_id = VA_INVALID_ID;
+	if (hw_ctx != NULL && strip.image_id != VA_INVALID_ID)
+		vaDestroyImage(va_display(), strip.image_id);
+	strip.image_id = VA_INVALID_ID;
 	av_buffer_unref(&hw_ctx);
 	if (dump != NULL)
 		fclose(dump);
@@ -319,14 +483,9 @@ static int submit(PDECODE_UNIT unit)
 	hold(row.decode_start_us);
 	row.decode_end_us = LiGetMicroseconds();
 	row.decode_status = err;
-	/* After the decode's own time is taken, so checking doesn't count as decoding. */
-	if (picture_threshold > 0 && err == 0 && row.width > 0) {
-		struct picture_result r;
-		uint64_t start = LiGetMicroseconds();
-		check_picture(frame, &r);
-		record_picture(row.frame_number, row.recovery, row.frame_type == FRAME_TYPE_IDR, &r,
-			       r.readable && r.worst > picture_threshold, (LiGetMicroseconds() - start) / 1000.0);
-	}
+	/* Checked on the worker's thread, after the decode's own time is taken. */
+	if (picture_threshold > 0 && err == 0 && row.width > 0)
+		queue_picture(frame, row.frame_number, row.recovery, row.frame_type == FRAME_TYPE_IDR);
 	record_frame(&row);
 	return err < 0 ? DR_NEED_IDR : DR_OK;
 }

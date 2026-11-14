@@ -254,6 +254,11 @@ void record_picture(int frame_number, bool recovery, bool keyframe, const struct
 	}
 	pic_ms[pic_n] = check_ms;
 	pic_worst[pic_n++] = r->worst;
+	if (r->decoded_width > 0) {
+		pic.wrong_size++;
+		pic.wrong_width = r->decoded_width;
+		pic.wrong_height = r->decoded_height;
+	}
 	if (!r->readable) {
 		pic.unreadable++;
 	} else {
@@ -280,9 +285,15 @@ void record_picture(int frame_number, bool recovery, bool keyframe, const struct
 		}
 	}
 	stats_line("{\"type\":\"picture\",\"frame_number\":%d,\"readable\":%s,\"stamp\":%u,\"worst\":%.2f,"
-		   "\"mean\":%.2f,\"corrupt\":%s,\"recovery_run\":%d,\"check_ms\":%.3f,\"unix_us\":%lld}\n",
+		   "\"mean\":%.2f,\"corrupt\":%s,\"recovery_run\":%d,\"decoded_width\":%d,\"decoded_height\":%d,"
+		   "\"check_ms\":%.3f,\"unix_us\":%lld}\n",
 		   frame_number, r->readable ? "true" : "false", r->frame, r->worst, r->mean, corrupt ? "true" : "false",
-		   pic_recovery_run, check_ms, (long long)wall_now_us());
+		   pic_recovery_run, r->decoded_width, r->decoded_height, check_ms, (long long)wall_now_us());
+}
+
+void record_picture_skipped(void)
+{
+	pic.skipped++;
 }
 
 void picture_stats(struct picture_stats *out)
