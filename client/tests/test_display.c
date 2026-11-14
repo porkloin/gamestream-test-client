@@ -78,6 +78,15 @@ int main(void)
 	display_simulate(ready, N, 60, 120, false, &s, NULL);
 	CHECK(s.judder == 0 && s.dropped == 0);
 
+	/* A slow first frame (the keyframe, decoded 5 ms late) doesn't move the refreshes: it shares a refresh with the
+	 * second, which is dropped, and every frame after waits half a refresh, as if it had been on time. */
+	frames(ready, 120, 0, 5000);
+	display_simulate(ready, N, 120, 120, false, &s, each);
+	int typical = 0;
+	for (int i = 2; i < N; i++)
+		typical += llabs(each[i].wait_us - 500000 / 120) <= 2;
+	CHECK(typical == N - 2 && each[1].wait_us < 0 && fabs(s.latency_p50_ms - 500.0 / 120) < 0.1);
+
 	/* A 100 ms freeze, then the frames held up arrive at once: a judder, and the queue drops the backlog. */
 	frames(ready, 120, -1, 0);
 	for (int i = 100; i < 112; i++)
