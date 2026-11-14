@@ -147,6 +147,10 @@ static void usage(int code)
 		"    --seconds N             (20)\n"
 		"    --display HZ            the refresh rate of the display the summary shows the frames on, through\n"
 		"                            moonlight-qt's V-Sync and frame pacing (the stream's frame rate)\n"
+		"    --check-picture         with framestamp as the app: check every decoded frame against the frame\n"
+		"                            framestamp drew (its stamp says which), and count the corrupt ones\n"
+		"    --picture-threshold N   luma levels a tile can be off on average before the frame is corrupt (20)\n"
+		"    --picture-dump DIR      write the first 3 corrupt frames there, decoded beside expected, as PGM\n"
 		"    --csv PATH              per-frame record\n"
 		"    --stats PATH            per-frame JSON lines as frames decode, times by the wall clock\n"
 		"    --clock HOST[:PORT]     measure the host's clock by NTP before and after the stream\n"
@@ -324,7 +328,7 @@ static bool write_json(const char *path, const struct named *v, size_t n, bool e
 
 static int stream(PSERVER_DATA server, int argc, char **argv)
 {
-	enum { CODEC = 256, HDR, DECODE, DECODE_DEVICE, AVOID_GPU, DUMP, MODE, BITRATE, SECONDS, CSV, STATS, CLOCK, JSON, EXPECT, NO_RFI, RFI_H264, NO_ACK, QUIT, SEED, RANDOM, FRAME_EVERY, FRAME_RUN, WARMUP, BURST, BURSTY, PACKET_SIZE, DECODE_DELAY, DISPLAY, DELAY, REORDER, DUPLICATE, RATE, CLICK_EVERY };
+	enum { CODEC = 256, HDR, DECODE, DECODE_DEVICE, AVOID_GPU, DUMP, MODE, BITRATE, SECONDS, CSV, STATS, CLOCK, JSON, EXPECT, NO_RFI, RFI_H264, NO_ACK, QUIT, SEED, RANDOM, FRAME_EVERY, FRAME_RUN, WARMUP, BURST, BURSTY, PACKET_SIZE, DECODE_DELAY, DISPLAY, DELAY, REORDER, DUPLICATE, RATE, CLICK_EVERY, CHECK_PICTURE, PICTURE_THRESHOLD, PICTURE_DUMP };
 	static const struct option options[] = {
 		{"codec", required_argument, NULL, CODEC},
 		{"hdr", no_argument, NULL, HDR},
@@ -353,6 +357,9 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"loss-bursty", required_argument, NULL, BURSTY},
 		{"packet-size", required_argument, NULL, PACKET_SIZE},
 		{"display", required_argument, NULL, DISPLAY},
+		{"check-picture", no_argument, NULL, CHECK_PICTURE},
+		{"picture-threshold", required_argument, NULL, PICTURE_THRESHOLD},
+		{"picture-dump", required_argument, NULL, PICTURE_DUMP},
 		{"decode-delay", required_argument, NULL, DECODE_DELAY},
 		{"delay", required_argument, NULL, DELAY},
 		{"reorder", required_argument, NULL, REORDER},
@@ -367,7 +374,8 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	int width = 1920, height = 1080, fps = 60, bitrate = 20000, seconds = 20, packet_size = 0, display_hz = 0;
 	bool rfi = true, rfi_h264 = false, quit = false, hdr = false;
 	struct loss_config loss = {.seed = 1, .frame_warmup = 120};
-	bool decode_none = false, decode_hw = false;
+	bool decode_none = false, decode_hw = false, check_picture = false;
+	double picture_threshold = 20;
 	const char *decode_device = NULL, *avoid_gpu = NULL;
 	int click_every = 0;
 
@@ -435,6 +443,19 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 				return 2;
 			}
 			break;
+		case CHECK_PICTURE:
+			check_picture = true;
+			break;
+		case PICTURE_DUMP:
+			picture_set_dump(optarg);
+			break;
+		case PICTURE_THRESHOLD:
+			picture_threshold = atof(optarg);
+			if (picture_threshold <= 0) {
+				fprintf(stderr, "bad --picture-threshold: %s (luma levels, above 0)\n", optarg);
+				return 2;
+			}
+			break;
 		case DISPLAY:
 			display_hz = atoi(optarg);
 			if (display_hz < 1 || display_hz > 1000) {
@@ -497,6 +518,12 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		fprintf(stderr, "--click-every needs the pictures decoded (not --decode none)\n");
 		return 2;
 	}
+	if (check_picture && decode_none) {
+		fprintf(stderr, "--check-picture needs the pictures decoded (not --decode none)\n");
+		return 2;
+	}
+	if (check_picture)
+		decode_set_picture_check(picture_threshold);
 	click_configure(click_every);
 	/* The VAAPI device: the one asked for, or the best that decodes this codec; none, software. */
 	struct gpu gpus[16];
@@ -630,6 +657,8 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	struct display_stats vsync, paced;
 	display_stats(&vsync, &paced, fps, display_hz > 0 ? display_hz : fps);
 	bool displaying = !decode_none && vsync.shown > 0;
+	struct picture_stats pic;
+	picture_stats(&pic);
 	loss_stats(&loss_run);
 	click_stats(&clk);
 	bool intervals = rec.intervals > 0, clicking = click_enabled(), click_samples = clk.samples > 0;
@@ -652,6 +681,14 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 		{"decode_ms_p95", rec.decode_p95_ms, rec.decodes > 0 && !decode_none},
 		{"decode_ms_p99", rec.decode_p99_ms, rec.decodes > 0 && !decode_none},
 		{"decode_ms_max", rec.decode_max_ms, rec.decodes > 0 && !decode_none},
+		{"picture_checked", pic.checked, check_picture},
+		{"picture_unreadable", pic.unreadable, check_picture},
+		{"picture_corrupt", pic.corrupt, check_picture},
+		{"picture_corrupt_run_max", pic.corrupt_run_max, check_picture},
+		{"picture_recovery_corrupt_max", pic.recovery_corrupt_max, check_picture},
+		{"picture_repeats", pic.repeats, check_picture},
+		{"picture_worst_p99", pic.worst_p99, check_picture && pic.checked > pic.unreadable},
+		{"picture_check_ms_p99", pic.check_ms_p99, check_picture && pic.checked > 0},
 		{"display_hz", vsync.hz, displaying},
 		{"display_shown", (double)vsync.shown, displaying},
 		{"display_dropped", (double)vsync.dropped, displaying},
@@ -694,6 +731,11 @@ static int stream(PSERVER_DATA server, int argc, char **argv)
 	loss_summary(stdout, &loss_run);
 	if (displaying)
 		display_summary(stdout, &vsync, &paced);
+	if (check_picture)
+		printf("picture checked=%d unreadable=%d corrupt=%d corrupt_run_max=%d recovery_corrupt_max=%d repeats=%d "
+		       "worst_p99=%.1f check_ms_p99=%.2f\n",
+		       pic.checked, pic.unreadable, pic.corrupt, pic.corrupt_run_max, pic.recovery_corrupt_max, pic.repeats,
+		       pic.worst_p99, pic.check_ms_p99);
 	printf("requests idr=%d rfi=%d recovery=%d\n", (int)idr_requests, (int)rfi_requests,
 		(int)recovery_requests);
 	if (idr_requests > 0) {

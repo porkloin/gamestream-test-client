@@ -25,6 +25,8 @@ static FILE *dump;
 static const char *hw_device; /* a VAAPI render node, or NULL for software */
 static AVBufferRef *hw_ctx;
 static VAImage patch = {.image_id = VA_INVALID_ID}; /* the click detector's 32x32 patch, read back */
+static VAImage whole = {.image_id = VA_INVALID_ID}; /* --check-picture's whole frame, read back */
+static double picture_threshold; /* --check-picture: 0 off */
 
 void decode_set_hw(const char *device)
 {
@@ -110,6 +112,52 @@ static double hw_patch_luma(const AVFrame *f)
 	return luma;
 }
 
+void decode_set_picture_check(double threshold)
+{
+	picture_threshold = threshold;
+}
+
+/* --check-picture on a decoded frame: its luma plane, read back from the GPU for a VAAPI frame. */
+static void check_picture(const AVFrame *f, struct picture_result *r)
+{
+	memset(r, 0, sizeof *r);
+	if (f->format != AV_PIX_FMT_VAAPI) {
+		const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+		int depth = desc ? desc->comp[0].depth : 8;
+		picture_check(f->data[0], f->linesize[0], depth, f->width, f->height, r);
+		if (r->readable && r->worst > picture_threshold)
+			picture_dump(f->data[0], f->linesize[0], depth, f->width, f->height, r);
+		return;
+	}
+	VADisplay display = va_display();
+	enum AVPixelFormat sw = ((AVHWFramesContext *)f->hw_frames_ctx->data)->sw_format;
+	unsigned fourcc = sw == AV_PIX_FMT_P010 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+	if (whole.image_id == VA_INVALID_ID || whole.format.fourcc != fourcc || whole.width != f->width ||
+	    whole.height != f->height) {
+		if (whole.image_id != VA_INVALID_ID)
+			vaDestroyImage(display, whole.image_id);
+		whole.image_id = VA_INVALID_ID;
+		VAImageFormat format = {.fourcc = fourcc, .byte_order = VA_LSB_FIRST,
+					.bits_per_pixel = fourcc == VA_FOURCC_P010 ? 24 : 12};
+		if (vaCreateImage(display, &format, f->width, f->height, &whole) != VA_STATUS_SUCCESS) {
+			whole.image_id = VA_INVALID_ID;
+			return;
+		}
+	}
+	if (vaGetImage(display, (VASurfaceID)(uintptr_t)f->data[3], 0, 0, f->width, f->height, whole.image_id) !=
+	    VA_STATUS_SUCCESS)
+		return;
+	void *data;
+	if (vaMapBuffer(display, whole.buf, &data) != VA_STATUS_SUCCESS)
+		return;
+	picture_check((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0], fourcc == VA_FOURCC_P010 ? 16 : 8,
+		      f->width, f->height, r);
+	if (r->readable && r->worst > picture_threshold)
+		picture_dump((const uint8_t *)data + whole.offsets[0], (int)whole.pitches[0],
+			     fourcc == VA_FOURCC_P010 ? 16 : 8, f->width, f->height, r);
+	vaUnmapBuffer(display, whole.buf);
+}
+
 bool decode_set_dump(const char *path)
 {
 	dump = fopen(path, "wb");
@@ -190,6 +238,9 @@ static void cleanup(void)
 	if (hw_ctx != NULL && patch.image_id != VA_INVALID_ID)
 		vaDestroyImage(va_display(), patch.image_id);
 	patch.image_id = VA_INVALID_ID;
+	if (hw_ctx != NULL && whole.image_id != VA_INVALID_ID)
+		vaDestroyImage(va_display(), whole.image_id);
+	whole.image_id = VA_INVALID_ID;
 	av_buffer_unref(&hw_ctx);
 	if (dump != NULL)
 		fclose(dump);
@@ -268,6 +319,14 @@ static int submit(PDECODE_UNIT unit)
 	hold(row.decode_start_us);
 	row.decode_end_us = LiGetMicroseconds();
 	row.decode_status = err;
+	/* After the decode's own time is taken, so checking doesn't count as decoding. */
+	if (picture_threshold > 0 && err == 0 && row.width > 0) {
+		struct picture_result r;
+		uint64_t start = LiGetMicroseconds();
+		check_picture(frame, &r);
+		record_picture(row.frame_number, row.recovery, row.frame_type == FRAME_TYPE_IDR, &r,
+			       r.readable && r.worst > picture_threshold, (LiGetMicroseconds() - start) / 1000.0);
+	}
 	record_frame(&row);
 	return err < 0 ? DR_NEED_IDR : DR_OK;
 }
